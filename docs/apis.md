@@ -1,5 +1,3 @@
-# DocSignerNML
-
 Of course. Crafting professional, detailed, and machine-readable documentation is a critical step. An AI coding agent or a new developer should be able to look at this document and immediately understand how to interact with your API.
 
 Here is the complete documentation for your three primary API services, written in a structured Markdown format that is easy to parse.
@@ -262,17 +260,3 @@ curl -X POST "http://myapi.com/gemma3/v1/chat/completions" \
   "temperature": 0.7
 }'
 ```
-
-
-| # | API Endpoint Name | How It's Covered with Your Resources |
-|---|---|---|
-| 1 | `/api/ml/clause/recommend` | The **multimodal LLM** can analyze the contract's context and generate recommendations for suitable legal clauses, using its structured output feature to format them correctly. |
-| 2 | `/api/ml/text/simplify` | This is a primary function of an LLM. You can send any complex legal text to the **multimodal LLM** and request a plain-language summary. |
-| 3 | `/api/ml/clause/generate` | The **multimodal LLM** can take a natural language prompt (e.g., "Generate a confidentiality clause") and create the full text for the clause. |
-| 4 | `/api/ml/document/analyze-risk` | By providing the document's text to the **multimodal LLM**, you can prompt it to identify and list potential risks, ambiguities, or missing information in a structured format. |
-| 5 | `/api/ml/document/extract-entities` | The **multimodal LLM** excels at Named Entity Recognition. It can parse the document text and extract key information (names, dates, amounts) into a validated Pydantic object. |
-| 6 | `/api/ml/document/ocr` | This is directly handled by your dedicated **lightweight image OCR API**, which is optimized for converting document images to text in English and German. |
-| 7 | `/api/ml/task/extract-deliverables` | You can feed the contract text to the **multimodal LLM** and ask it to identify and structure all actionable items, deliverables, and obligations. |
-| 8 | `/api/ml/document/translate` | The **multimodal LLM** has strong built-in translation capabilities, allowing it to translate contract text between English, German, and other languages. |
-
-
