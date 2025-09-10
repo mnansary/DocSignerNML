@@ -1,0 +1,37 @@
+# FastAPI framework and server
+fastapi
+uvicorn[standard]
+
+# Pydantic for data validation and settings management
+pydantic
+pydantic-settings
+pydantic[email]
+email-validator
+
+# Database: SQLAlchemy ORM and PostgreSQL driver
+sqlalchemy
+psycopg2-binary
+alembic # For database migrations
+
+# PDF Manipulation
+PyMuPDF # High-performance PDF rendering and stamping
+pypdf   # Merging and reading PDFs
+reportlab # For generating the audit certificate PDF
+
+# Background Tasks with Celery
+celery
+redis
+
+# API Communication
+httpx # Modern async HTTP client for talking to your microservices
+
+# Hashing and Security
+passlib[bcrypt] # For password hashing (good practice for future features)
+python-jose[cryptography] # For JWT tokens if needed later
+
+# Environment variable loading
+python-dotenv
+
+# For serving static frontend files (development only)
+python-multipart
+aiofiles

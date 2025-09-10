@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocSign - Upload Document</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>Upload a Document to Begin</h1>
+            <p>Select a PDF file to start the signing process.</p>
+        </header>
+
+        <main>
+            <form id="upload-form">
+                <div class="file-input-wrapper">
+                    <input type="file" id="pdf-file" name="pdfFile" accept=".pdf" required>
+                    <label for="pdf-file" class="file-input-label">
+                        <span id="file-name-display">Choose a PDF file...</span>
+                    </label>
+                </div>
+                <button type="submit" id="upload-button">Upload & Prepare</button>
+            </form>
+            <div id="status-message" class="status"></div>
+        </main>
+    </div>
+
+    <!-- Our API client and page-specific logic -->
+    <script src="assets/js/apiClient.js"></script>
+    <script>
+        const uploadForm = document.getElementById('upload-form');
+        const pdfFileInput = document.getElementById('pdf-file');
+        const uploadButton = document.getElementById('upload-button');
+        const statusMessage = document.getElementById('status-message');
+        const fileNameDisplay = document.getElementById('file-name-display');
+
+        // Update the label text when a file is chosen
+        pdfFileInput.addEventListener('change', () => {
+            if (pdfFileInput.files.length > 0) {
+                fileNameDisplay.textContent = pdfFileInput.files[0].name;
+            } else {
+                fileNameDisplay.textContent = 'Choose a PDF file...';
+            }
+        });
+
+        uploadForm.addEventListener('submit', async (event) => {
+            event.preventDefault(); // Prevent the default form submission
+
+            const file = pdfFileInput.files[0];
+            if (!file) {
+                statusMessage.textContent = 'Please select a file first.';
+                statusMessage.className = 'status error';
+                return;
+            }
+
+            // Provide user feedback
+            statusMessage.textContent = 'Uploading...';
+            statusMessage.className = 'status info';
+            uploadButton.disabled = true;
+
+            try {
+                // Use our API client to upload the file
+                const result = await createEnvelope(file);
+                
+                statusMessage.textContent = `Success! Envelope created with ID: ${result.id}. Redirecting...`;
+                statusMessage.className = 'status success';
+
+                // On success, redirect to the setup page with the new envelope ID
+                setTimeout(() => {
+                    window.location.href = `setup.html?envelopeId=${result.id}`;
+                }, 1500); // Wait 1.5 seconds before redirecting
+
+            } catch (error) {
+                statusMessage.textContent = `Error: ${error.message}`;
+                statusMessage.className = 'status error';
+                uploadButton.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
