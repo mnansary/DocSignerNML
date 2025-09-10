@@ -2,7 +2,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- STATE MANAGEMENT ---
     const state = {
         envelopeId: null,
-        recipients: [], // { email, order, color }
+        // Frontend state can be simpler. We'll build the final payload at the end.
+        recipients: [], // { email, signingOrder, color }
         fields: [],     // { page, type, x, y, width, height, assigneeEmail }
         selectedRecipientEmail: null,
         dragging: {
@@ -12,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
             startY: 0,
             element: null
         },
-        // New pager state
         currentPage: 1,
         totalPages: 0
     };
@@ -28,7 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const fieldButtons = document.querySelectorAll('.field-btn');
     const saveSendBtn = document.getElementById('save-send-btn');
     const statusMessage = document.getElementById('status-message');
-    // New pager elements
     const prevPageBtn = document.getElementById('prev-page-btn');
     const nextPageBtn = document.getElementById('next-page-btn');
     const currentPageNumEl = document.getElementById('current-page-num');
@@ -47,15 +46,12 @@ document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         
         try {
-            // First, get the total page count using PDF.js
             updateStatus('Analyzing document...', 'info');
             const pdfData = await getOriginalPdf(state.envelopeId);
-            // Required for PDF.js
             pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
             const pdfDoc = await pdfjsLib.getDocument({ data: pdfData }).promise;
             state.totalPages = pdfDoc.numPages;
             
-            // Now load the first page and update UI
             await loadPage(state.currentPage);
             updatePager();
         } catch (error) {
@@ -70,7 +66,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const imageUrl = URL.createObjectURL(imageBlob);
             viewerContainer.innerHTML = `<img src="${imageUrl}" id="pdf-page-image" alt="PDF Page ${pageNum}">`;
             state.currentPage = pageNum;
-            // After loading the new page, re-render the fields for this page
             renderFields();
             updatePager();
             updateStatus('');
@@ -81,7 +76,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- UI & STATE UPDATES ---
     function updateRecipientUI() {
-        // ... (this function remains the same)
         recipientSelect.innerHTML = '';
         if (state.recipients.length === 0) {
             recipientSelect.innerHTML = '<option>Add a recipient to start</option>';
@@ -104,12 +98,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function renderFields() {
         document.querySelectorAll('.placed-field').forEach(el => el.remove());
-        // Filter fields to only show ones for the CURRENT page
         const fieldsForCurrentPage = state.fields.filter(f => f.page === state.currentPage);
         
         fieldsForCurrentPage.forEach(field => {
             const fieldEl = document.createElement('div');
-            // We store the original index to allow for future deletion/editing
             fieldEl.dataset.index = state.fields.indexOf(field);
             fieldEl.className = 'placed-field';
             fieldEl.style.left = `${field.x}%`;
@@ -133,14 +125,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateStatus(message, type = '') {
-        // ... (this function remains the same)
         statusMessage.textContent = message;
         statusMessage.className = `status ${type}`;
     }
 
     // --- EVENT LISTENERS ---
     function setupEventListeners() {
-        // ... (existing listeners for modal, form, select, field buttons)
         addRecipientBtn.addEventListener('click', () => modal.style.display = 'flex');
         cancelModalBtn.addEventListener('click', () => modal.style.display = 'none');
         recipientForm.addEventListener('submit', handleAddRecipient);
@@ -151,15 +141,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.dragging.type = btn.dataset.type;
             });
         });
-
-        // New pager listeners
         prevPageBtn.addEventListener('click', () => {
             if (state.currentPage > 1) loadPage(state.currentPage - 1);
         });
         nextPageBtn.addEventListener('click', () => {
             if (state.currentPage < state.totalPages) loadPage(state.currentPage + 1);
         });
-
         viewerContainer.addEventListener('mousedown', startDrag);
         document.addEventListener('mousemove', handleDrag);
         document.addEventListener('mouseup', endDrag);
@@ -168,29 +155,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- HANDLERS ---
     function handleAddRecipient(e) {
-        // ... (this function remains the same)
         e.preventDefault();
         const email = document.getElementById('recipient-email').value;
-        const order = parseInt(document.getElementById('signing-order').value, 10);
+        // CORRECTED: Use 'signingOrder' to match backend schema.
+        const signingOrder = parseInt(document.getElementById('signing-order').value, 10);
+        
         if (state.recipients.some(r => r.email === email)) {
             alert('This recipient email has already been added.');
             return;
         }
+
         const color = `hsl(${(state.recipients.length * 137.508) % 360}, 50%, 50%)`;
-        state.recipients.push({ email, order, color });
+        // CORRECTED: Store with the correct key.
+        state.recipients.push({ email, signingOrder, color });
+        
         updateRecipientUI();
         recipientForm.reset();
         modal.style.display = 'none';
     }
 
     async function handleSaveAndSend() {
-        // ... (this function remains the same)
         updateStatus('Saving configuration...', 'info');
         saveSendBtn.disabled = true;
+
+        // --- MAJOR FIX: Build the payload to EXACTLY match Pydantic schemas ---
         const setupData = {
-            recipients: state.recipients.map(({email, order}) => ({email, order})),
-            fields: state.fields
+            recipients: state.recipients.map(({ email, signingOrder }) => ({
+                email: email,
+                signing_order: signingOrder // Use the correct key 'signing_order'
+            })),
+            fields: state.fields.map(field => ({
+                page_number: field.page,
+                type: field.type,
+                x_coord: field.x,
+                y_coord: field.y,
+                width: field.width,
+                height: field.height,
+                assignee_email: field.assigneeEmail
+            }))
         };
+        // --- END OF FIX ---
+
         try {
             await setupEnvelope(state.envelopeId, setupData);
             updateStatus('Configuration saved. Sending for signatures...', 'info');
@@ -204,14 +209,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- DRAG-AND-DROP LOGIC ---
     function endDrag(e) {
-        // This function needs to be updated to use the current page number
         if (!state.dragging.active) return;
         state.dragging.active = false;
         viewerContainer.style.cursor = 'default';
 
         const { width, height } = viewerContainer.getBoundingClientRect();
+        
+        // Ensure width and height are not zero to avoid division by zero
+        if (width === 0 || height === 0) {
+            state.dragging.element.remove();
+            state.dragging = { active: false, type: null, element: null, startX: 0, startY: 0 };
+            return;
+        }
+
         const fieldData = {
-            // UPDATED: Use the current page from state
             page: state.currentPage,
             type: state.dragging.type,
             assigneeEmail: state.selectedRecipientEmail,
@@ -228,7 +239,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renderFields();
     }
     
-    // The startDrag and handleDrag functions remain the same
     function startDrag(e) {
         if (!state.dragging.type || e.target.id !== 'pdf-page-image') return;
         state.dragging.active = true;
@@ -241,6 +251,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.dragging.element.style.top = `${state.dragging.startY}px`;
         viewerContainer.appendChild(state.dragging.element);
     }
+
     function handleDrag(e) {
         if (!state.dragging.active) return;
         const rect = viewerContainer.getBoundingClientRect();

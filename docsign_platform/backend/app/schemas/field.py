@@ -1,10 +1,11 @@
 from pydantic import BaseModel
 from typing import Optional
+from .enums import FieldTypeEnum
 
 # Base properties shared across all Field schemas
 class FieldBase(BaseModel):
     page_number: int
-    type: str  # e.g., "signature", "date", "text"
+    type: FieldTypeEnum   # e.g., "signature", "date", "text"
     x_coord: float
     y_coord: float
     width: float

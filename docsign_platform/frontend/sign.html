@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocSign - Sign Document</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <div class="toolbar">
+        <div class="toolbar-section">
+            <span id="doc-info">Please review and complete the required fields.</span>
+        </div>
+        <div class="toolbar-section">
+            <button id="finish-btn" class="primary-action" disabled>Finish & Submit</button>
+        </div>
+    </div>
+
+    <div class="document-workspace">
+        <div id="viewer-container">
+            <!-- PDF page and fields will be rendered here -->
+        </div>
+        <div id="status-message" class="status"></div>
+    </div>
+
+    <!-- NEW: Modal for Text Input -->
+    <div id="text-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h2>Enter Required Information</h2>
+            <form id="text-form">
+                <textarea id="text-input" rows="3" required></textarea>
+                <div class="modal-actions">
+                    <button type="submit">Save Text</button>
+                    <button type="button" class="cancel-btn">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- UPDATED: Modal for the signature pad -->
+    <div id="signature-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content signature-modal-content">
+            <!-- Tabs for signature type -->
+            <div class="signature-tabs">
+                <button class="tab-btn active" data-tab="draw">Draw</button>
+                <button class="tab-btn" data-tab="type">Type</button>
+                <button class="tab-btn" data-tab="upload">Upload</button>
+            </div>
+            
+            <!-- Tab Content -->
+            <div id="draw" class="tab-content active">
+                <div class="signature-pad-container">
+                    <canvas id="signature-canvas"></canvas>
+                </div>
+            </div>
+            <div id="type" class="tab-content">
+                <input type="text" id="typed-signature-input" placeholder="Type your full name">
+                <div id="typed-signature-preview" class="signature-font-preview"></div>
+            </div>
+            <div id="upload" class="tab-content">
+                <input type="file" id="upload-signature-input" accept="image/png, image/jpeg">
+                <p>Upload an image of your signature.</p>
+            </div>
+
+            <div class="modal-actions">
+                <button class="cancel-btn">Cancel</button>
+                <button id="clear-signature-btn">Clear</button>
+                <button id="save-signature-btn">Adopt & Sign</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- External Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/signature_pad/1.5.3/signature_pad.min.js"></script>
+    <script src="assets/js/apiClient.js" defer></script>
+    <script src="assets/js/sign.js" defer></script>
+</body>
+</html>

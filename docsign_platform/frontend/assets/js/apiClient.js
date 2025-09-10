@@ -68,9 +68,25 @@ async function setupEnvelope(envelopeId, setupData) {
             },
             body: JSON.stringify(setupData),
         });
+
         if (!response.ok) {
             const errorData = await response.json();
+            
+            // --- IMPROVED ERROR HANDLING ---
+            // FastAPI validation errors are in `errorData.detail`.
+            // It's usually an array of error objects.
+            if (errorData.detail && Array.isArray(errorData.detail)) {
+                // Format the error messages into a readable string.
+                const messages = errorData.detail.map(err => {
+                    // err.loc is an array like ["body", "fields", 0, "type"]
+                    const field = err.loc.join(' -> '); 
+                    return `${field}: ${err.msg}`; // e.g., "body -> fields -> 0 -> type: Input should be 'signature'..."
+                });
+                throw new Error(messages.join('\n'));
+            }
+            // Fallback for other types of errors
             throw new Error(errorData.detail || 'Failed to save template.');
+            // --- END OF IMPROVEMENT ---
         }
         return await response.json();
     } catch (error) {
@@ -78,7 +94,6 @@ async function setupEnvelope(envelopeId, setupData) {
         throw error;
     }
 }
-
 /**
  * Triggers the backend to send the envelope for signing.
  * @param {string} envelopeId The ID of the envelope to send.
@@ -115,6 +130,82 @@ async function getOriginalPdf(envelopeId) {
         return await response.arrayBuffer();
     } catch (error) {
         console.error('Error fetching original PDF:', error);
+        throw error;
+    }
+}
+
+/**
+ * Fetches the required data for a signer using their unique token.
+ * @param {string} token The signing token from the URL.
+ * @returns {Promise<Object>} The data needed for signing (envelopeId, fields).
+ */
+async function getSigningData(token) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/sign/${token}`);
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to load signing data.');
+        }
+        return await response.json();
+    } catch (error) {
+        console.error('Error fetching signing data:', error);
+        throw error;
+    }
+}
+
+/**
+ * Submits the filled-out field data (signatures, text) to the backend.
+ * @param {string} token The signing token.
+ * @param {Object} submissionData The payload containing the field values.
+ * @returns {Promise<Object>} The success message from the server.
+ */
+async function submitSignature(token, submissionData) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/sign/${token}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(submissionData),
+        });
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to submit signature.');
+        }
+        return await response.json();
+    } catch (error) {
+        console.error('Error submitting signature:', error);
+        throw error;
+    }
+}
+
+/**
+ * Verifies a signed document by uploading it along with its envelope ID.
+ * @param {string} envelopeId The ID of the envelope.
+ * @param {File} file The signed PDF file to verify.
+ * @returns {Promise<Object>} The verification result from the server.
+ */
+async function verifyDocument(envelopeId, file) {
+    const formData = new FormData();
+    formData.append('envelope_id', envelopeId);
+    formData.append('file', file);
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/verify/`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        // For verification, we always want the JSON body, even on failure
+        const resultData = await response.json();
+
+        if (!response.ok) {
+            throw new Error(resultData.detail || 'Verification request failed.');
+        }
+
+        return resultData;
+    } catch (error) {
+        console.error('Error verifying document:', error);
         throw error;
     }
 }

@@ -91,19 +91,29 @@ def setup_envelope_template(
     if envelope.status != "draft":
         raise HTTPException(status_code=400, detail="Envelope has already been configured and sent.")
 
+    # 1. Create recipient objects and add them to the session
     recipient_map = {}
     for recipient_in in setup_data.recipients:
         recipient = crud_recipient.create_recipient(db=db, obj_in=recipient_in, envelope_id=envelope_id)
         recipient_map[recipient.email] = recipient
-    
+
+    # 2. Flush the session to the database.
+    # This sends the INSERT for recipients and populates their IDs,
+    # but does NOT commit the transaction yet.
+    db.flush()
+
+    # 3. Now that recipient.id is populated, create the fields
     for field_in in setup_data.fields:
         recipient = recipient_map.get(field_in.assignee_email)
         if not recipient:
+            # This check is now even more important
             raise HTTPException(status_code=400, detail=f"Recipient with email {field_in.assignee_email} not found.")
+        
+        # At this point, recipient.id is guaranteed to have a value
         crud_field.create_field(db=db, obj_in=field_in, envelope_id=envelope_id, recipient_id=recipient.id)
-    
-    db.commit()
 
+    # 4. Finally, commit the entire transaction (recipients and fields)
+    db.commit()
     return {"message": "Envelope template configured successfully."}
 
 
@@ -131,8 +141,8 @@ def send_envelope_for_signing(
     crud_audit_trail.create_audit_log(db=db, envelope_id=envelope_id, event="Envelope Sent")
 
     for recipient in recipients_to_notify:
-        base_url = str(request.base_url).rstrip('/')
-        signing_link = f"{base_url}sign.html?token={recipient.signing_token}"
+        # Construct the link reliably to avoid missing slashes
+        signing_link = f"{request.url.scheme}://{request.url.netloc}/sign.html?token={recipient.signing_token}"
 
         send_signing_request_email(recipient.email, signing_link)
 

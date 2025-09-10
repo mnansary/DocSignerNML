@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Float, Text, Enum, ForeignKey
 from sqlalchemy.orm import relationship
-from app.db.base import Base
+from app.db.base_class import Base
+from app.schemas.enums import FieldTypeEnum
 
 class Field(Base):
     __tablename__ = "fields"
@@ -12,7 +13,7 @@ class Field(Base):
     page_number = Column(Integer, nullable=False)
     
     type = Column(
-        Enum("signature", "initial", "date", "text", "checkbox", name="field_type_enum"),
+        Enum(FieldTypeEnum, name="field_type_enum", values_callable=lambda obj: [e.value for e in obj]),
         nullable=False
     )
     

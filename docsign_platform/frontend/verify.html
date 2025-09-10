@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocSign - Verify Document</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>Verify a Signed Document</h1>
+            <p>Upload the completed document and its Envelope ID to check its authenticity.</p>
+        </header>
+
+        <main>
+            <form id="verify-form">
+                <div class="form-group">
+                    <label for="envelope-id">Envelope ID</label>
+                    <input type="text" id="envelope-id" required placeholder="Enter the Envelope ID from the audit page">
+                </div>
+
+                <div class="file-input-wrapper">
+                    <input type="file" id="pdf-file" accept=".pdf" required>
+                    <label for="pdf-file" class="file-input-label">
+                        <span id="file-name-display">Choose the signed PDF file...</span>
+                    </label>
+                </div>
+                <button type="submit" id="verify-button">Verify Document</button>
+            </form>
+            
+            <!-- Result will be displayed here -->
+            <div id="result-container" style="display: none;">
+                <h2>Verification Result</h2>
+                <div id="result-message" class="status"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="assets/js/apiClient.js" defer></script>
+    <script src="assets/js/verify.js" defer></script>
+</body>
+</html>

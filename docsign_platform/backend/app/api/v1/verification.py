@@ -3,38 +3,31 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.crud import crud_envelope
-from app.schemas.message import Message # Reusable message schema
+from app.schemas.message import Message
 from app.api import deps
 from app.utils.helpers import calculate_sha256
 
 router = APIRouter()
 
 class VerificationResult(Message):
-    """Extends the base message to include verification status."""
     is_authentic: bool
     envelope_id: str | None = None
     completed_at: str | None = None
 
-
+# Add 'async' to the function definition
 @router.post("/", response_model=VerificationResult)
-def verify_document_integrity(
+async def verify_document_integrity(
     *,
     db: Session = Depends(deps.get_db),
-    # The envelope ID must be sent along with the file in a multipart form
     envelope_id: str = Form(...),
     file: UploadFile = File(...)
 ):
     """
     Verifies the integrity of a signed document.
-    - User uploads the final PDF and provides its Envelope ID.
-    - The API calculates the hash of the uploaded file.
-    - It compares this new hash with the 'final_hash' stored in the database.
-    - If they match, the document is authentic. If not, it has been altered.
     """
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF is allowed.")
         
-    # Retrieve the original envelope record from the database
     envelope = crud_envelope.get_envelope(db=db, envelope_id=envelope_id)
     if not envelope:
         raise HTTPException(status_code=404, detail="Envelope ID not found in our records.")
@@ -42,24 +35,24 @@ def verify_document_integrity(
     if not envelope.final_hash or envelope.status != "completed":
         raise HTTPException(status_code=400, detail="This envelope has not been completed and cannot be verified yet.")
         
-    # To calculate the hash, we must save the uploaded file temporarily
-    temp_dir = "backend/storage/temp_verification" # A dedicated temp folder
+    # Use an absolute path for the temporary directory for reliability
+    temp_dir = os.path.abspath(os.path.join("backend/storage", "temp_verification"))
     os.makedirs(temp_dir, exist_ok=True)
-    temp_file_path = os.path.join(temp_dir, file.filename)
+    # Use a unique name to avoid conflicts if multiple users verify at once
+    temp_file_path = os.path.join(temp_dir, f"verify_{envelope_id}_{file.filename}")
     
     try:
+        # Use 'async with' and 'await' to handle the file content
         with open(temp_file_path, "wb") as buffer:
-            buffer.write(file.read())
+            content = await file.read() # <-- Use await here
+            buffer.write(content)
 
-        # Calculate the hash of the file the user just uploaded
         uploaded_file_hash = calculate_sha256(temp_file_path)
         
     finally:
-        # Ensure the temporary file is deleted after hashing
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
             
-    # The moment of truth: compare the hashes
     if uploaded_file_hash == envelope.final_hash:
         return {
             "is_authentic": True,

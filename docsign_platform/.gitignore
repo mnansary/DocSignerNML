@@ -13,7 +13,7 @@ pip-delete-this-directory.txt
 .env
 
 # Storage - DO NOT commit user data
-backend/storage/
+backend/backend/storage/
 
 # IDE / Editor specific
 .idea/

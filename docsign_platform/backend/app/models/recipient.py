@@ -1,7 +1,7 @@
 import secrets
 from sqlalchemy import Column, String, Integer, DateTime, func, Enum, ForeignKey
 from sqlalchemy.orm import relationship
-from app.db.base import Base
+from app.db.base_class import Base
 
 class Recipient(Base):
     __tablename__ = "recipients"
