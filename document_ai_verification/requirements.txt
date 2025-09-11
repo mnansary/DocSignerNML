@@ -1,0 +1,38 @@
+# ===================================================================
+# Python Dependencies for Document AI Verification (Multi-Modal)
+# ===================================================================
+
+# --- Core Web Framework ---
+# For building the backend API
+fastapi
+uvicorn[standard]
+
+# --- AI & Machine Learning Clients ---
+# The official client for OpenAI-compatible APIs
+openai
+
+# --- Data Validation & Configuration ---
+pydantic
+python-dotenv
+PyYAML
+
+# --- PDF & Image Processing ---
+# The modern PDF library for splitting pages
+pypdf
+# For converting PDF pages into images (requires Poppler)
+pdf2image
+# For image manipulation (used in testing)
+Pillow
+# The core library for high-quality PDF to Markdown conversion
+markitdown[pdf]
+
+# --- HTTP Requests ---
+# For making calls to the OCR and frontend API calls
+requests
+
+# --- Frontend UI ---
+streamlit
+
+# --- File Uploads ---
+# Required by FastAPI for handling file uploads
+python-multipart

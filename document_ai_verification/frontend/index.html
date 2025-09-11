@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Verification</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Document Verification Auditor</h1>
+            <p>Upload the original and signed documents to begin the verification process.</p>
+        </header>
+
+        <main>
+            <div class="upload-section">
+                <!-- NSV File Input -->
+                <label for="nsv-file" class="file-upload-label">
+                    <span>Original (Non-Signed) PDF</span>
+                    <p class="file-name" id="nsv-file-name">Click or drop file here</p>
+                </label>
+                <input type="file" id="nsv-file" name="nsv_file" accept=".pdf" hidden>
+
+                <!-- SV File Input -->
+                <label for="sv-file" class="file-upload-label">
+                    <span>Final Signed PDF</span>
+                    <p class="file-name" id="sv-file-name">Click or drop file here</p>
+                </label>
+                <input type="file" id="sv-file" name="sv_file" accept=".pdf" hidden>
+            </div>
+
+            <button id="verify-button" disabled>Verify Documents</button>
+
+            <div id="results-section" class="hidden">
+                <h2>Verification Report</h2>
+                <div class="report-summary">
+                    <div><strong>Overall Status:</strong> <span id="overall-status"></span></div>
+                    <div><strong>Original File:</strong> <span id="nsv-filename"></span></div>
+                    <div><strong>Signed File:</strong> <span id="sv-filename"></span></div>
+                    <div><strong>Total Pages:</strong> <span id="page-count"></span></div>
+                </div>
+                <div id="page-results-container">
+                    <!-- Page-wise results will be injected here by JavaScript -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- The log section is removed as we cannot get real-time server logs -->
+
+    <script src="script.js"></script>
+</body>
+</html>

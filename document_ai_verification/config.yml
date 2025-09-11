@@ -1,0 +1,38 @@
+# ===================================================================
+# Document AI Verification Application Configuration
+# ===================================================================
+# This file contains non-secret settings for the application.
+# Secrets and API URLs should be placed in the .env file.
+
+# -------------------------------------
+# Application-Wide Settings
+# -------------------------------------
+application:
+  # Directory for storing temporary files like PDF page images during processing.
+  # This path is relative to the project root. The app will create it if it doesn't exist.
+  temp_storage_path: "temp_files"
+  
+  # Dots Per Inch (DPI) for converting PDF pages to rasterized images (e.g., PNG).
+  # Higher values result in better quality images for OCR and sign detection,
+  # but also lead to larger file sizes and longer processing times. 300 is a good balance.
+  pdf_to_image_dpi: 300
+
+# -------------------------------------
+# AI Service Parameters
+# -------------------------------------
+ai_services:
+  # Default parameters for the Large Language Model (LLM) client.
+  # These values can be overridden on a per-call basis if needed.
+  llm:
+    # Controls the randomness of the output. A value of 0.0 is deterministic,
+    # which is ideal for structured data extraction to ensure consistent results.
+    temperature: 0.0
+    
+    # The maximum number of new tokens the model is allowed to generate in a single response.
+    # Set this to a reasonable value to prevent runaway generation and control costs/latency.
+    max_new_tokens: 2048
+
+  
+  # Parameters for the OCR service. This section is included for future-proofing
+  # in case the OCR service adds configurable parameters later.
+  ocr: {}
