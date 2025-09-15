@@ -206,4 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .vscode/
-random_docs/
+
+sample_document.png
+tests/doctests
+tests/temp_files_jupyter
