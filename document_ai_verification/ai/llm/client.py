@@ -166,30 +166,86 @@ class LLMService:
         except Exception as e:
             logging.error(f"An error occurred during structured vision invoke: {e}", exc_info=True)
             raise
+    
+    def invoke_image_compare_structured(
+        self, prompt: str, image_path_1: Path, image_path_2: Path, response_model: Type[PydanticModel], **kwargs: Any
+    ) -> PydanticModel:
+        """
+        Sends a text prompt and two images to the VLLM for comparison and parses a structured JSON response.
+
+        Args:
+            prompt (str): The text prompt describing the comparison task.
+            image_path_1 (Path): Path to the first image file.
+            image_path_2 (Path): Path to the second image file.
+            response_model (Type[PydanticModel]): The Pydantic model to structure the response.
+            **kwargs: Additional arguments to pass to the API (e.g., temperature, max_tokens).
+
+        Returns:
+            PydanticModel: The parsed response conforming to the specified model.
+
+        Raises:
+            ValueError: If the model returns an empty response.
+            ContextLengthExceededError: If the prompt exceeds the model's context window.
+            Exception: For other API or processing errors.
+        """
+        logging.info(f"Performing vision-based comparison for images: {image_path_1.name} and {image_path_2.name}")
+        
+        # Encode both images to base64
+        base64_image_1 = encode_image_to_base64(image_path_1)
+        base64_image_2 = encode_image_to_base64(image_path_2)
+        
+        # Build the structured prompt
+        structured_prompt = build_structured_prompt(prompt, response_model)
+        
+        # Construct the message with text prompt and two images
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": structured_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image_1}"},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image_2}"},
+                    },
+                ],
+            }
+        ]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, 
+                messages=messages, 
+                response_format={"type": "json_object"}, 
+                **kwargs
+            )
+            json_response_str = response.choices[0].message.content
+            if not json_response_str:
+                raise ValueError("The vision model returned an empty response.")
+            return response_model.model_validate_json(json_response_str)
+        except BadRequestError as e:
+            if "context length" in str(e).lower() or "too large" in str(e).lower():
+                logging.error(f"Prompt exceeded context window for model {self.model}.")
+                raise ContextLengthExceededError(
+                    f"Prompt is too long for the model's {self.max_context_tokens} token limit."
+                ) from e
+            else:
+                logging.error(f"Unhandled BadRequestError during structured image comparison invoke: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An error occurred during structured image comparison invoke: {e}", exc_info=True)
+            raise
 
 if __name__ == '__main__':
-    # --- Pydantic Models for Testing ---
-    class NIDInfo(BaseModel):
-        name: str = Field(description="The person's full name in Bengali.")
-        father_name: str = Field(description="The person's father's name in Bengali.")
-        occupation: str = Field(description="The person's occupation in Bengali.")
-
-    class PassportInfo(BaseModel):
-        application_type: str = Field(description="The type of passport application, e.g., 'নতুন' (New) or 'নবায়ন' (Renewal).")
-        delivery_type: str = Field(description="The delivery speed, e.g., 'জরুরি' (Urgent) or 'সাধারণ' (Regular).")
-        validity_years: int = Field(description="The validity period of the passport in years.")
-
-
-    # --- NEW Pydantic Models for Vision-based Signature Detection ---
-    class VLLMSignatureBox(BaseModel):
-        box: List[int] = Field(description="A list of 4 integers representing the bounding box in [x1, y1, x2, y2] format.")
-
-    class VLLMSignatureResponse(BaseModel):
-        detections: List[VLLMSignatureBox] = Field(description="A list of all detected signatures.")
-    
     # --- Setup and Initialization ---
     project_root = Path(__file__).resolve().parent.parent.parent
     load_dotenv(dotenv_path=project_root / ".env")
+    # Use the same sample image as other tests
+    sample_image_path = project_root / "sample_document.png"
+
     # --- Setup and Initialization ---
     print("--- Running Synchronous LLMService Tests ---")
     
@@ -202,70 +258,4 @@ if __name__ == '__main__':
     else:
         print("\nWARNING: Small LLM environment variables not set. Skipping tests for small model.")
 
-    # --- NEW TEST: Vision-based Signature Detection ---
-    if llm_service:
-        print("\n--- Test 4: VLLM - Vision-based Signature Detection ---")
-        try:
-            # Define the prompt instructing the VLLM what to do
-            vision_prompt = "You are a signature detection expert. Analyze the provided image and identify the locations of all handwritten signatures. Provide the bounding box for each signature. The origin (0,0) is the top-left corner of the image."
-            
-            # Use the same sample image as other tests
-            sample_image_path = project_root / "sample_document.png"
-
-            if not sample_image_path.exists():
-                print(f"❌ Test Skipped: Sample image 'sample_document.png' not found in project root.")
-            else:
-                print(f"Prompt: {vision_prompt}")
-                print(f"Image: {sample_image_path.name}")
-                
-                # Call the new vision method
-                signature_data = llm_service.invoke_vision_structured(
-                    prompt=vision_prompt,
-                    image_path=sample_image_path,
-                    response_model=VLLMSignatureResponse,
-                    temperature=0.0,
-                    max_tokens=1024
-                )
-                
-                print("\n✅ Vision Call Successful! Parsed Response:")
-                print(signature_data.model_dump_json(indent=2))
-
-        except Exception as e:
-            print(f"An error occurred during vision test: {e}")
-
-    # Test 1: Small LLM - Invoke
-    if llm_service:
-        print("\n--- Test 1: Small LLM - Invoke ---")
-        try:
-            prompt = "জন্ম নিবন্ধন সনদের গুরুত্ব কী?"
-            print(f"Prompt: {prompt}")
-            response = llm_service.invoke(prompt, temperature=0.1, max_tokens=256)
-            print(f"Response:\n{response}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-
-    # Test 2: Small LLM - Stream
-    if llm_service:
-        print("\n--- Test 2: Small LLM - Stream ---")
-        try:
-            prompt = "পাসপোর্ট অফিসের একজন কর্মকর্তার একটি সংক্ষিপ্ত বর্ণনা দিন।"
-            print(f"Prompt: {prompt}\nStreaming Response:")
-            for chunk in llm_service.stream(prompt, temperature=0.2, max_tokens=256):
-                print(chunk, end="", flush=True)
-            print()
-        except Exception as e:
-            print(f"An error occurred: {e}")
-
-    # Test 3: Small LLM - Structured Invoke
-    if llm_service:
-        print("\n--- Test 3: Small LLM - Structured Invoke ---")
-        try:
-            prompt = "আমার নাম 'করিম চৌধুরী', পিতার নাম 'রহিম চৌধুরী', আমি একজন ছাত্র। এই তথ্য দিয়ে একটি এনআইডি কার্ডের তথ্য তৈরি করুন।"
-            print(f"Prompt: {prompt}")
-            nid_data = llm_service.invoke_structured(prompt, NIDInfo, temperature=0.0)
-            print(f"Parsed Response:\n{nid_data.model_dump_json(indent=2 )}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            
     
-    print("\n--- All Synchronous Tests Concluded ---")

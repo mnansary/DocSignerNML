@@ -23,6 +23,7 @@ pypdf
 pdf2image
 # For image manipulation (used in testing)
 Pillow
+opencv-python
 # The core library for high-quality PDF to Markdown conversion
 markitdown[pdf]
 

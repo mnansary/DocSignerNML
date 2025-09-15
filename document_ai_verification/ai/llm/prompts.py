@@ -1,72 +1,107 @@
 import json
 # document_ai_verification/ai/llm/prompts.py
 
-# This first prompt is still needed for the initial analysis of the NSV text.
-def get_ns_document_analysis_prompt(page_text_content: str) -> str:
+def get_ns_document_analysis_prompt_holistic(page_text_content: str) -> str:
     """
-    Generates a prompt to instruct an LLM to analyze the text of a
-    non-signed document page and identify all required user inputs.
+    Generates a merged, gigantic prompt to instruct an LLM with vision capabilities to holistically analyze the text and image of a
+    non-signed document page, identify all required user inputs (excluding pre-filled fields with strong emphasis on accuracy),
+    catalog pre-filled fields separately (with special emphasis on detecting signatures, dates, names, checkboxes, etc.),
+    and provide a short summary of the overall status. This merges the strengths of both non-holistic (precise requirement detection)
+    and holistic approaches, ensuring nothing is missed.
     """
     prompt = f"""
-    **Your Role:** You are a hyper-attentive, detail-oriented document processing specialist with extensive experience in form analysis and data extraction. Your expertise lies in meticulously reviewing textual content from various documents, such as legal forms, applications, contracts, and administrative paperwork, to pinpoint every instance where a user must provide personal input. You approach this task with precision, ensuring no potential input field is overlooked, while strictly adhering to predefined guidelines to maintain consistency and accuracy.
+    **Your Role:** You are a hyper-attentive, detail-oriented document processing specialist with extensive experience in form analysis, data extraction, and vision-enhanced processing. Your expertise lies in meticulously reviewing textual content and images from various documents, such as legal forms, applications, contracts, and administrative paperwork, to pinpoint every instance where a user must provide personal input or where fields are already pre-filled. You approach this task with precision, ensuring no potential field—blank or filled—is overlooked, while strictly adhering to predefined guidelines to maintain consistency and accuracy. Emphasize thorough cross-verification between text and image to avoid missing any details, especially pre-filled signatures, which must be detected via visual cues like handwritten squiggles or electronic marks.
 
-    **Your Task:** Carefully examine the provided text from a single page of a non-signed document. Your objective is to identify and catalog all locations where the document explicitly or implicitly requires a user to enter information, such as writing text, signing, dating, initialing, checking boxes, or providing other details. This analysis is crucial for automating document preparation processes, so your output must be thorough, reliable, and formatted exactly as specified.
+    **Your Task:** Carefully examine the provided text from a single page of a non-signed document and the accompanying image. Your objective is to identify and catalog all locations where the document explicitly or implicitly requires a user to enter information (blank fields) in 'required_inputs', all pre-filled fields in 'prefilled_inputs', and provide a concise summary in 'summary'. Exclude any pre-filled fields from 'required_inputs' with absolute certainty. This merged analysis combines precise detection of required inputs (ensuring all blanks are captured without fabrication) with holistic cataloging of pre-filled items, crucial for automating document preparation processes. Your output must be thorough, reliable, and formatted exactly as specified. Do not miss any fields: double-check for signatures, dates, names, checkboxes, initials, addresses, and other inputs in both text and image.
 
     **Critical Instructions:**
-    1. **Identify the Marker Text:** For each input field, locate and extract the exact, unique, machine-printed text label or phrase that is immediately adjacent to or directly associated with the field. This "marker_text" serves as a reliable anchor for later verification and must be copied verbatim from the document text without any alterations, paraphrasing, or summarization. For example:
+    1. **Analyze Text and Image Together:** Use the provided text (extracted from the document) and the image to identify input fields, both blank and pre-filled. The text provides explicit labels, context, and sometimes filled data, while the image may reveal visual cues such as blank lines, underscores, checkboxes, handwritten/printed content indicating filled fields, signatures (which appear as unique squiggly lines or marks), checked boxes (with ticks, crosses, or fills), or other indicators. Cross-reference both meticulously to ensure accuracy—resolve any discrepancies by prioritizing visual evidence from the image for filled status (e.g., if text shows blanks but image shows handwriting, mark as pre-filled).
+
+    2. **Identify the Marker Text:** For each input field (blank or pre-filled), locate and extract the exact, unique, machine-printed text label or phrase that is immediately adjacent to or directly associated with the field. This "marker_text" serves as a reliable anchor for later verification and must be copied verbatim from the document text without any alterations, paraphrasing, or summarization. For example:
        - Correct: "Signature of Applicant:"
        - Incorrect: "applicant's signature" (this is paraphrased and lacks the original punctuation and capitalization).
-       Focus on text that clearly indicates an input is needed, such as labels ending with colons, underscores, or blank lines described in the text.
+       Focus on text that clearly indicates a field is present, such as labels ending with colons, underscores, or blank lines described in the text. Ensure marker_text includes any relevant symbols like □ for checkboxes if present in the text. Emphasize: Do not miss subtle markers near potential signatures or other fields.
 
-    2. **Determine the Input Type:** Classify each identified input field into one of the following predefined categories based on the context and marker text:
-       - 'signature': For fields requiring a handwritten or electronic signature (e.g., "Signature:", "Sign Here:").
-       - 'date': For fields requiring a date entry (e.g., "Date:", "Date of Birth:").
-       - 'full_name': For fields requiring the user's full printed name (e.g., "Print Name:", "Full Name:").
-       - 'initials': For fields requiring initials (e.g., "Initial Here:", "Applicant's Initials:").
-       - 'checkbox': For fields involving checking or marking a box (e.g., "Check if Applicable □", "Yes/No □").
-       - 'address': For fields requiring an address (e.g., "Mailing Address:", "Street Address:").
-       - 'other': For any input that doesn't fit the above categories, such as phone numbers, email, or custom text (e.g., "Phone Number:", "Email Address:").
-       Use only these types; do not invent new ones. Base your classification on the most logical fit from the surrounding text.
+    3. **Determine the Input Type:** Classify each identified field (blank or pre-filled) into one of the following predefined categories based on the context and marker text from the text, combined with visual cues from the image:
+       - 'signature': For fields requiring a handwritten or electronic signature (e.g., "Signature:", "Sign Here:"). Emphasize detection: If the image shows any squiggly line, name-like script, or mark in the signature area, classify as pre-filled with value 'SIGNED'.
+       - 'date': For fields requiring a date entry (e.g., "Date:", "Date of Birth:"). If filled, extract the exact date string.
+       - 'full_name': For fields requiring the user's full printed name (e.g., "Print Name:", "Full Name:"). If filled, extract the name text.
+       - 'initials': For fields requiring initials (e.g., "Initial Here:", "Applicant's Initials:"). If filled, extract initials if readable, else 'INITIALED'.
+       - 'checkbox': For fields involving checking or marking a box (e.g., "Check if Applicable □", "Yes/No □"). Emphasize: Use image to confirm if checked (tick, cross, fill)—if yes, value 'CHECKED'; if unchecked, it's required.
+       - 'address': For fields requiring an address (e.g., "Mailing Address:", "Street Address:"). Treat multi-part as one unless distinctly separate.
+       - 'other': For any input that doesn't fit the above categories, such as phone numbers, email, or custom text (e.g., "Phone Number:", "Email Address:"). If filled, extract the text.
+       Use only these types; do not invent new ones. Base your classification on the most logical fit from the surrounding text and image. Emphasize: Thoroughly scan for all possible types without omission.
 
-    3. **Provide a Description:** For each input, include a brief, concise, human-readable explanation of what the user is expected to provide. This should be 1-2 sentences at most, focusing on clarity without unnecessary details (e.g., "User must provide their full printed name in this field.").
+    4. **Catalog Required (Blank) Fields:** For fields that are completely blank in both text (e.g., no data after label) and image (no handwriting, marks, or fills visible), include them in 'required_inputs'. This mirrors precise requirement detection: Only include if truly blank and requiring input. Provide:
+       - input_type: As classified.
+       - marker_text: Exact verbatim label.
+       - description: A brief, concise, human-readable explanation of what the user is expected to provide. This should be 1-2 sentences at most, focusing on clarity without unnecessary details (e.g., "User must provide their full printed name in this field." or "User must sign here to acknowledge the terms."). Ensure no pre-filled fields sneak into this list—double-check image for subtle fills like faint signatures.
 
-    4. **Handle Variations and Edge Cases:** Documents may present input fields in diverse ways. Recognize variations such as:
-       - Underscores or blank lines: Text like "Name: ____________________" indicates a 'full_name' input with marker_text "Name:".
-       - Bracketed or parenthetical instructions: "Signature (required):" is a 'signature' with marker_text "Signature (required):".
-       - Checkbox descriptions: "□ Agree to Terms" is a 'checkbox' with marker_text "Agree to Terms" (include the box symbol if present in text).
-       - Multi-part fields: "Address: Street ________ City ________ State ____ Zip ____" should be treated as one 'address' input with marker_text "Address:".
-       - Implicit fields: If text says "Please sign and date below" followed by blanks, identify separate 'signature' and 'date' inputs with appropriate markers like "Please sign and date below".
+    5. **Exclude and Catalog Pre-Filled Fields:** Do NOT include any fields that are already filled in 'required_inputs'—this is crucial; always exclude them rigorously as per text and image evidence. Instead, catalog them in 'prefilled_inputs'. Filled status is indicated by:
+       - Text content: If the text explicitly states a field contains data (e.g., "Name: John Doe" or "Date: 01/01/2023"), include as pre-filled.
+       - Image content: If the image shows handwritten or printed text, signatures (squiggly lines), dates, checked boxes (ticks/fills), initials, or any content in the field, include as pre-filled, even if text suggests a blank (e.g., "Signature: ________" in text but visible signature in image = pre-filled with 'SIGNED'). Emphasize: Special attention to signatures—do not miss them; look for any non-blank visual elements in signature areas.
+       For each pre-filled field, provide:
+       - input_type: As classified.
+       - marker_text: Exact verbatim label.
+       - value: Extract or describe the filled content precisely. For text/date/address/other: the exact readable text (use OCR-like vision to read from image if not in text). For signature: "SIGNED" (do not attempt to read names from signatures). For checkbox: "CHECKED". For initials: the initials if clearly readable (e.g., 'JD'), else "INITIALED". If value can't be precisely read (e.g., illegible handwriting), use "FILLED". Only include filled fields here; never blanks.
 
-    5. **Examples of Analysis:** To guide your reasoning, consider these illustrative examples based on hypothetical document snippets:
-       - Example 1: Text contains "Employee Name: ____________________". Output: A RequiredInput with input_type='full_name', marker_text='Employee Name:', description='User must print their full name here.'.
-       - Example 2: Text contains "□ I accept the conditions". Output: RequiredInput with input_type='checkbox', marker_text='I accept the conditions', description='User must check this box to indicate acceptance.'.
-       - Example 3: Text contains "Signature: ________ Date: ________". Output: Two RequiredInputs – one 'signature' with marker_text='Signature:', description='User must provide their signature.'; one 'date' with marker_text='Date:', description='User must enter the current date.'.
-       - Example 4: Text contains "Initial each page: ____". Output: RequiredInput with input_type='initials', marker_text='Initial each page:', description='User must provide their initials on this page.'.
-       - Example 5: Text contains purely instructional paragraphs with no blanks or labels for input. Output: An empty list for required_inputs.
+    6. **Provide a Description for Required Inputs:** Ensure each required_input has a brief, concise explanation, reflecting the input type and context, without redundancy.
 
-    6. **Handle the "No Inputs" Case:** If the page consists solely of informational content, instructions, or static text without any fields, labels, or indicators for user input (e.g., no blanks, no "Sign here", no checkboxes), you MUST return an empty list for `required_inputs`. Do not fabricate inputs where none exist.
+    7. **Generate Summary:** Provide a short summary (1-2 sentences) of the overall status, inferring multi-party contexts if applicable (e.g., sections for 'Buyer' and 'Seller', where one might have filled their parts). Describe what's filled vs. blank, listing key items. Examples:
+       - "No fields are prefilled; all identified fields require user input including name, date, and signature."
+       - "One party has filled their name, date, and signature; the other party's corresponding fields remain blank and require input."
+       - "Several checkboxes are checked, a date is provided, and a signature is signed; full name and address are blank." Emphasize completeness: Mention if signatures or other crucial fields are pre-filled or required.
 
-    7. **Strictly Adhere to the Schema:** Your final output MUST be a valid JSON object conforming exactly to the following Pydantic schema. Do not include any additional text, explanations, code, markdown, or characters outside this JSON object. The schema is:
-       - PageInputAnalysis:
-         - required_inputs: List[RequiredInput] (an array of objects; empty if no inputs)
-       - RequiredInput:
-         - input_type: str (one of the specified types)
-         - marker_text: str (exact text from document)
-         - description: str (brief explanation)
+    8. **Handle Variations and Edge Cases:** Documents may present fields in diverse ways—recognize and handle all without missing:
+       - Underscores or blank lines: Text like "Name: ____________________" or blank line in image = blank 'full_name' unless filled in image.
+       - Bracketed or parenthetical instructions: "Signature (required):" with signature in image = pre-filled 'signature' with "SIGNED".
+       - Checkbox descriptions: "□ Agree to Terms" = 'checkbox' with marker_text "□ Agree to Terms" (include symbol); unchecked = required, checked = pre-filled "CHECKED".
+       - Multi-part fields: "Address: Street ________ City ________ State ____ Zip ____" = one 'address' if all blank or all filled; if partially filled, mark as pre-filled or split into separate if markers allow.
+       - Implicit fields: "Please sign and date below" followed by blanks = separate 'signature' and 'date'; if image shows signature but blank date, pre-filled signature, required date.
+       - Pre-filled by one party: E.g., in multi-party docs, catalog one side's filled signatures/names/dates as pre-filled, other's blanks as required; note in summary.
+       Emphasize: For signatures, always check image carefully—do not miss pre-filled ones; if any mark present, it's "SIGNED".
 
-       Ensure the JSON is properly formatted, with double quotes around keys and strings, and no trailing commas.
+    9. **Examples of Analysis:** To guide your reasoning, consider these merged illustrative examples:
+       - Example 1: Text: "Employee Name: ____________________"; Image: Blank line. Output: required_inputs with input_type='full_name', marker_text='Employee Name:', description='User must print their full name here.'; prefilled_inputs empty; summary='No fields are prefilled; full name requires input.'.
+       - Example 2: Text: "□ I accept the conditions"; Image: Unchecked box. Output: required_inputs with input_type='checkbox', marker_text='□ I accept the conditions', description='User must check this box to indicate acceptance.'; prefilled_inputs empty; summary='No fields are prefilled; checkbox requires input.'.
+       - Example 3: Text: "Signature: ________ Date: 01/01/2023"; Image: Blank signature area, filled date text. Output: required_inputs with input_type='signature', marker_text='Signature:', description='User must provide their signature.'; prefilled_inputs with input_type='date', marker_text='Date:', value='01/01/2023'; summary='The date is prefilled; signature remains blank and requires input.'.
+       - Example 4: Text: "Initial each page: ____"; Image: Handwritten initials. Output: required_inputs empty; prefilled_inputs with input_type='initials', marker_text='Initial each page:', value='FILLED' (or exact if readable); summary='Initials are prefilled; no required inputs.'.
+       - Example 5: Text: "Signature: ________"; Image: Squiggly signature line. Output: required_inputs empty; prefilled_inputs with input_type='signature', marker_text='Signature:', value='SIGNED'; summary='The signature is prefilled; no blank fields require input.'.
+       - Example 6: Text and Image: Purely instructional paragraphs with no blanks or labels. Output: Empty lists for required_inputs and prefilled_inputs; summary='No fields present on this page; purely informational content.'.
+
+    10. **Handle the "No Inputs/Fields" Case:** If the page consists solely of informational content, instructions, or static text without any fields, labels, or indicators for input (blank or filled) in both text and image, you MUST return empty lists for 'required_inputs' and 'prefilled_inputs', and a summary indicating no fields. Do not fabricate fields where none exist.
+
+    11. **Strictly Adhere to the Schema:** Your final output MUST be a valid JSON object conforming exactly to the following Pydantic schema. Do not include any additional text, explanations, code, markdown, or characters outside this JSON object. The schema is:
+        - PageHolisticAnalysis:
+          - required_inputs: List[RequiredInput] (an array of objects; empty if no blanks)
+          - prefilled_inputs: List[PrefilledInput] (an array of objects; empty if no filled)
+          - summary: str (short summary)
+        - RequiredInput:
+          - input_type: str (one of the specified types)
+          - marker_text: str (exact text from document)
+          - description: str (brief explanation)
+        - PrefilledInput:
+          - input_type: str (one of the specified types)
+          - marker_text: str (exact text from document)
+          - value: str (extracted or descriptive value)
+        Ensure the JSON is properly formatted, with double quotes around keys and strings, and no trailing commas.
 
     **Document Page Text to Analyze:**
     ---
     {page_text_content}
     ---
 
+    **Image Analysis:** 
+    * Use the provided image to confirm the presence of blank fields, checkboxes, or other visual indicators of required inputs, and filled fields. Exclude filled fields (e.g., containing handwritten or printed text, signatures, or checked boxes) from requirements but include them in prefilled_inputs.
+    * THERE MIGHT BE ALREADY PROVIDED SIGNATURE, NAME, DATE, CHECK BOXES BY ONE PARTY. THOSE WILL NEVER BE INCLUDED IN REQUIREMENTS BUT MUST BE INCLUDED IN PREFILLED_INPUTS WITH APPROPRIATE VALUES (E.G., 'SIGNED' FOR SIGNATURES), AND NOTED IN THE SUMMARY. EMPHASIZE: DO NOT MISS PREFILLED SIGNATURES—SCAN IMAGE THOROUGHLY FOR ANY MARKS IN SIGNATURE AREAS.
+
     **Final Reminder:** Output ONLY the JSON object. No introductions, conclusions, or extra content.
     """
     return prompt
 
+def get_image_comparison_prompt() -> str:
+    
 
-def get_vllm_ocr_prompt() -> str:
     """
     Generates a prompt to instruct a Vision-Language Large Model (VLLM) to function as a highly accurate, formatting-aware Optical Character Recognition (OCR) engine for document image processing.
     """

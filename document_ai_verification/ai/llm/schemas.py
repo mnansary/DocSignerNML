@@ -7,20 +7,32 @@ from pydantic import BaseModel, Field
 # SECTION 1: Schemas for the Initial NSV Analysis
 # ===================================================================
 
+
 class RequiredInput(BaseModel):
     """
-    Represents a single input field identified in the non-signed document.
+    Represents a single input field identified in the non-signed document that requires user input.
     """
     input_type: str = Field(..., description="The type of input required (e.g., 'signature', 'date', 'full_name').")
     marker_text: str = Field(..., description="The unique text label that identifies the input field.")
     description: str = Field(..., description="A brief, human-readable explanation of what is required.")
 
-class PageInputAnalysis(BaseModel):
+class PrefilledInput(BaseModel):
     """
-    The complete analysis of a single NSV page, listing all required inputs.
-    This is the target schema for the 'get_ns_document_analysis_prompt'.
+    Represents a single prefilled field identified in the non-signed document.
+    """
+    input_type: str = Field(..., description="The type of input (e.g., 'signature', 'date', 'full_name').")
+    marker_text: str = Field(..., description="The unique text label that identifies the field.")
+    value: str = Field(..., description="The filled value, or 'SIGNED' for signatures, 'CHECKED' for checkboxes, etc.")
+
+class PageHolisticAnalysis(BaseModel):
+    """
+    The holistic analysis of a single NSV page, listing required inputs, prefilled fields, and a summary.
+    This is the target schema for the 'get_ns_document_analysis_prompt_holistic'.
     """
     required_inputs: List[RequiredInput] = Field(default_factory=list)
+    prefilled_inputs: List[PrefilledInput] = Field(default_factory=list)
+    summary: str = Field(..., description="A short summary of the prefilled and required fields, e.g., 'No fields are filled' or 'One party filled name, date, and signature; other party fields are blank.'")
+
 
 # ===================================================================
 # SECTION 2: Schema for VLLM-based OCR
