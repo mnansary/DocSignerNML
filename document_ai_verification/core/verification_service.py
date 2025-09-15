@@ -1,5 +1,5 @@
 # document_ai_verification/core/verification_service.py
-
+import asyncio
 import logging
 from pathlib import Path
 import json
@@ -76,18 +76,24 @@ async def run_verification_workflow(
 
         # --- FIX: Save the files from bytes instead of UploadFile objects ---
         yield {"type": "status_update", "message": f"Saving original document: {nsv_filename}"}
+        await asyncio.sleep(0.01)
         nsv_path = handler.save_bytes_as_file(nsv_file_bytes, nsv_filename)
 
         yield {"type": "status_update", "message": f"Saving signed document: {sv_filename}"}
+        await asyncio.sleep(0.01)
         sv_path = handler.save_bytes_as_file(sv_file_bytes, sv_filename)
 
         # --- From this point on, the logic is identical as it works with file paths ---
 
         yield {"type": "status_update", "message": "Extracting pages from original document..."}
+        await asyncio.sleep(0.01)
         nsv_page_bundles = handler.extract_content_per_page(nsv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
 
         yield {"type": "status_update", "message": "Extracting pages from signed document..."}
+        await asyncio.sleep(0.01)
         sv_page_bundles = handler.extract_content_per_page(sv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
+
+        
         
         _save_debug_json(nsv_page_bundles, "step_1_nsv_page_bundles.json", debug_output_path)
         _save_debug_json(sv_page_bundles, "step_1_sv_page_bundles.json", debug_output_path)
@@ -96,6 +102,7 @@ async def run_verification_workflow(
             raise PageCountMismatchError(f"NSV has {len(nsv_page_bundles)} pages, SV has {len(sv_page_bundles)} pages.")
 
         yield {"type": "status_update", "message": f"Found {len(nsv_page_bundles)} pages. Starting Stage 1: Requirement Analysis..."}
+        await asyncio.sleep(0.01)
         
         requirements_map: Dict[int, PageHolisticAnalysis] = {}
         for page_bundle in nsv_page_bundles:
@@ -103,6 +110,7 @@ async def run_verification_workflow(
             page_img = page_bundle["image_path"]
             
             yield {"type": "status_update", "message": f"Analyzing requirements for Page {page_num}..."}
+            await asyncio.sleep(0.01)
 
             prompt = get_ns_document_analysis_prompt_holistic(page_bundle['markdown_text'])
             page_req_result = LLM_CLIENT.invoke_vision_structured(
@@ -123,24 +131,29 @@ async def run_verification_workflow(
                     "result": result_payload
                 }
             }
-            
+            await asyncio.sleep(0.01)
+
         
         _save_debug_json(requirements_map, "step_2_requirements_map.json", debug_output_path)
         yield {"type": "status_update", "message": "Stage 1 analysis complete."}
+        await asyncio.sleep(0.01)
         
         yield {
             "type": "workflow_complete",
             "data": {
                 "final_status": "Success",
-                "message": "All planned stages have finished."
+                "message": "All planned stages have finished. AND THE VERIFICATION WAS SUCCESSFUL!",
             }
         }
+        await asyncio.sleep(0.01)
             
     except (PageCountMismatchError, DocumentVerificationError) as e:
         logger.error(f"A known document processing error occurred: {e}")
         yield {"type": "error", "message": str(e)}
+        await asyncio.sleep(0.01)
     except Exception as e:
         logger.exception("An unexpected error occurred during the verification workflow.")
         yield {"type": "error", "message": f"An unexpected server error occurred. Please check system logs."}
+        await asyncio.sleep(0.01)
     finally:
         handler.cleanup()
