@@ -1,19 +1,26 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Element References ---
     const nsvFileInput = document.getElementById('nsv-file');
     const svFileInput = document.getElementById('sv-file');
     const nsvFileName = document.getElementById('nsv-file-name');
     const svFileName = document.getElementById('sv-file-name');
     const verifyButton = document.getElementById('verify-button');
-    const resultsSection = document.getElementById('results-section');
-    const pageResultsContainer = document.getElementById('page-results-container');
 
+    // --- Output Area References ---
+    const outputContainer = document.getElementById('output-container');
+    const logSection = document.getElementById('log-section');
+    const logStream = document.getElementById('log-stream');
+    const reportsContainer = document.getElementById('reports-container');
+    const summarySection = document.getElementById('summary-section');
+    const finalStatusMessage = document.getElementById('final-status-message');
+
+    // --- File Input Handling ---
     function checkFilesAndEnableButton() {
         const nsvReady = nsvFileInput.files.length > 0;
         const svReady = svFileInput.files.length > 0;
         verifyButton.disabled = !(nsvReady && svReady);
     }
 
-    // Update file name display on selection
     nsvFileInput.addEventListener('change', () => {
         if (nsvFileInput.files.length > 0) {
             nsvFileName.textContent = nsvFileInput.files[0].name;
@@ -36,14 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
         checkFilesAndEnableButton();
     });
 
-    // Handle verification button click
+    // --- Main Verification Logic ---
     verifyButton.addEventListener('click', async () => {
-        // Reset UI
-        verifyButton.disabled = true;
-        verifyButton.textContent = 'Processing... Please Wait';
-        resultsSection.classList.add('hidden');
-        pageResultsContainer.innerHTML = '';
-        
+        resetUI();
+
         const formData = new FormData();
         formData.append('nsv_file', nsvFileInput.files[0]);
         formData.append('sv_file', svFileInput.files[0]);
@@ -58,54 +61,146 @@ document.addEventListener('DOMContentLoaded', () => {
                 const errorData = await response.json();
                 throw new Error(errorData.detail || `Server Error: ${response.status}`);
             }
-
-            const report = await response.json();
-            displayReport(report);
+            
+            await processStream(response);
 
         } catch (error) {
-            alert(`An error occurred: ${error.message}`);
-            console.error('Verification failed:', error);
-        } finally {
-            // Re-enable the button once processing is complete
-            verifyButton.disabled = false;
-            verifyButton.textContent = 'Verify Documents';
+            handleEvent({ type: 'error', message: `Client-side error: ${error.message}` });
         }
     });
 
-    function displayReport(report) {
-        // Populate summary
-        document.getElementById('overall-status').textContent = report.overall_status;
-        document.getElementById('overall-status').className = report.overall_status;
-        document.getElementById('nsv-filename').textContent = report.nsv_filename;
-        document.getElementById('sv-filename').textContent = report.sv_filename;
-        document.getElementById('page-count').textContent = report.page_count;
+    // --- UI Management Functions ---
+    function resetUI() {
+        verifyButton.disabled = true;
+        verifyButton.textContent = 'Processing...';
+        
+        outputContainer.classList.remove('hidden');
+        logStream.textContent = '';
+        reportsContainer.innerHTML = '';
+        summarySection.classList.add('hidden');
+        finalStatusMessage.textContent = '';
+    }
 
-        // Populate page-wise results
-        report.page_results.forEach(page => {
-            const pageDiv = document.createElement('div');
-            pageDiv.className = 'page-result';
-            const statusClass = page.page_status.replace(/\s+/g, '-');
-            pageDiv.innerHTML = `
-                <div class="page-header">
-                    <h3>Page ${page.page_number}</h3>
-                    <span class="page-status ${statusClass}">${page.page_status}</span>
-                </div>
-                <div class="page-content">
-                    <h4>Auditor's Findings</h4>
-                    <p>${page.findings}</p>
-                </div>
-            `;
-            pageResultsContainer.appendChild(pageDiv);
-        });
+    function addLogMessage(message, isError = false) {
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = document.createElement('div');
+        logEntry.textContent = `[${timestamp}] ${message}`;
+        if (isError) {
+            logEntry.classList.add('error');
+        }
+        logStream.appendChild(logEntry);
+        logStream.scrollTop = logStream.scrollHeight; // Auto-scroll
+    }
 
-        // Add event listeners for collapsibles
-        document.querySelectorAll('.page-header').forEach(header => {
-            header.addEventListener('click', () => {
-                const content = header.nextElementSibling;
-                content.classList.toggle('open');
-            });
-        });
+    // --- Stream Processing ---
+    async function processStream(response) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        resultsSection.classList.remove('hidden');
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+                 addLogMessage("Stream finished.");
+                 break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop(); // Keep the last, possibly incomplete, part
+
+            for (const part of parts) {
+                if (part.startsWith('data:')) {
+                    const jsonString = part.substring(5).trim();
+                    if (!jsonString) continue;
+
+                    try {
+                        const event = JSON.parse(jsonString);
+                        // --- FIX: Move the try/catch to be more specific ---
+                        try {
+                           handleEvent(event);
+                        } catch (renderError) {
+                            console.error("Error rendering event data:", renderError);
+                            handleEvent({ type: 'error', message: `Failed to render UI for event: ${renderError.message}` });
+                        }
+                    } catch (parseError) {
+                        console.error('Failed to parse JSON from stream:', jsonString);
+                        handleEvent({ type: 'error', message: 'Received malformed data from server.' });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Event Handling ---
+    function handleEvent(event) {
+        switch (event.type) {
+            case 'status_update':
+                addLogMessage(event.message);
+                break;
+            case 'process_step_result':
+                renderProcessStep(event.data);
+                break;
+            case 'workflow_complete':
+                renderWorkflowComplete(event.data);
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verify Again';
+                break;
+            case 'error':
+                addLogMessage(event.message, true);
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verification Failed. Retry?';
+                break;
+            default:
+                console.warn('Received unknown event type:', event.type);
+        }
+    }
+    
+    // --- Dynamic HTML Rendering ---
+    function renderProcessStep(data) {
+        const { stage_id, stage_title, result } = data;
+        const containerId = `results-container-${stage_id}`;
+
+        let stageContainer = document.getElementById(containerId);
+        if (!stageContainer) {
+            stageContainer = document.createElement('div');
+            stageContainer.id = containerId;
+            stageContainer.className = 'stage-container';
+            stageContainer.innerHTML = `<h2>${stage_title}</h2>`;
+            reportsContainer.appendChild(stageContainer);
+        }
+
+        const resultCard = document.createElement('div');
+        resultCard.className = 'result-card';
+        
+        // --- FIX: Render the correct data structure from PageHolisticAnalysis ---
+        const requiredInputsHtml = result.required_inputs.length > 0
+            ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
+            : '<li>None</li>';
+
+        const prefilledInputsHtml = result.prefilled_inputs.length > 0
+            ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
+            : '<li>None</li>';
+
+        resultCard.innerHTML = `
+            <div class="card-header">
+                <h4>Page ${result.page_number}</h4>
+            </div>
+            <div class="card-content">
+                <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
+                <h5>Required Inputs</h5>
+                <ul>${requiredInputsHtml}</ul>
+                <h5>Prefilled Inputs</h5>
+                <ul>${prefilledInputsHtml}</ul>
+            </div>
+        `;
+        stageContainer.appendChild(resultCard);
+    }
+    
+    function renderWorkflowComplete(data) {
+        summarySection.classList.remove('hidden');
+        finalStatusMessage.textContent = `${data.final_status}: ${data.message}`;
+        finalStatusMessage.className = data.final_status.toLowerCase(); // 'success' or 'failure'
     }
 });

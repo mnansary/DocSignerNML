@@ -209,4 +209,4 @@ __marimo__/
 
 sample_document.png
 tests/doctests
-tests/temp_files_jupyter
+tests/temp_files

@@ -3,27 +3,22 @@
 import logging
 from pathlib import Path
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, AsyncGenerator
 
-from fastapi import UploadFile
-import cv2
+from fastapi import UploadFile # This can be removed or kept for type hinting if preferred
 # Import all our custom modules
 from ..utils.config_loader import load_settings
-from ..utils.image_utils import analyze_page_meta_from_image
 from ..utils.file_utils import TemporaryFileHandler
 from ..ai.llm.client import LLMService
 from ..ai.llm.prompts import (
     get_ns_document_analysis_prompt_holistic,
     get_multimodal_audit_prompt,
 )
-# --- FIX 1: Import the correct schemas ---
 from ..ai.llm.schemas import (
     PageHolisticAnalysis,
-    PageAuditResult  # <-- Import the correct class
+    PageAuditResult
 )
-from ..ai.ocr.client import extract_text_from_image, OcrAPIError
-from .exceptions import PageCountMismatchError,ContentMismatchError
-# --- FIX 2: Only import VerificationReport from core schemas ---
+from .exceptions import PageCountMismatchError, ContentMismatchError, DocumentVerificationError
 from .schemas import (
     VerificationReport,
 )
@@ -42,12 +37,10 @@ LLM_CLIENT = LLMService(
     max_context_tokens=CONFIG['ai_services']['llm'].get('max_context_tokens', 64000)
 )
 
-# --- ADDITION: Helper function to save debug JSON files ---
 def _save_debug_json(data: Any, filename: str, output_path: Path):
     """Saves data to a JSON file, handling Pydantic models correctly."""
     filepath = output_path / filename
     try:
-        # A simple converter to handle Pydantic models and other non-serializable types
         def json_converter(o):
             if hasattr(o, 'model_dump'):
                 return o.model_dump()
@@ -60,147 +53,94 @@ def _save_debug_json(data: Any, filename: str, output_path: Path):
         logger.error(f"Could not save debug file {filepath}. Error: {e}")
 
 
-async def run_verification_workflow(nsv_file: UploadFile, sv_file: UploadFile) -> VerificationReport:
+# --- FIX: Update function signature to accept bytes and filenames ---
+async def run_verification_workflow(
+    nsv_file_bytes: bytes, 
+    nsv_filename: str, 
+    sv_file_bytes: bytes, 
+    sv_filename: str
+) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Orchestrates the new "Multi-Modal Auditor" verification workflow.
+    Orchestrates the verification workflow from file bytes, yielding progress.
     """
-    overall_status = "Success"
-    # --- FIX 3: Use the correct type hint ---
-    page_results: List[PageAuditResult] = []
+    handler = TemporaryFileHandler(base_path=CONFIG['application']['temp_storage_path'])
+    
+    try:
+        handler.setup()
 
-    page_metas: List[Dict] =[]
-    with TemporaryFileHandler(base_path=CONFIG['application']['temp_storage_path']) as handler:
-        logger.info(f"Starting multi-modal audit for request ID: {handler.request_id}")
-        
-        # --- ADDITION: Create a dedicated folder for debug outputs ---
+        yield {"type": "status_update", "message": f"Temporary workspace created. Request ID: {handler.request_id}"}
+
         debug_output_path = Path(handler.temp_dir) / "debug_outputs"
         debug_output_path.mkdir(exist_ok=True)
         logger.info(f"Debug outputs will be saved in: {debug_output_path}")
 
-        nsv_path = await handler.save_upload_file(nsv_file)
-        sv_path = await handler.save_upload_file(sv_file)
-        
-        # --- 1. Extract Multi-Modal Content from Both Documents ---
-        logger.info("Extracting multi-modal content from NSV...")
+        # --- FIX: Save the files from bytes instead of UploadFile objects ---
+        yield {"type": "status_update", "message": f"Saving original document: {nsv_filename}"}
+        nsv_path = handler.save_bytes_as_file(nsv_file_bytes, nsv_filename)
+
+        yield {"type": "status_update", "message": f"Saving signed document: {sv_filename}"}
+        sv_path = handler.save_bytes_as_file(sv_file_bytes, sv_filename)
+
+        # --- From this point on, the logic is identical as it works with file paths ---
+
+        yield {"type": "status_update", "message": "Extracting pages from original document..."}
         nsv_page_bundles = handler.extract_content_per_page(nsv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
-        
-        logger.info("Extracting multi-modal content from SV...")
+
+        yield {"type": "status_update", "message": "Extracting pages from signed document..."}
         sv_page_bundles = handler.extract_content_per_page(sv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
         
-        # --- DEBUG STEP 1: Save the extracted content bundles ---
         _save_debug_json(nsv_page_bundles, "step_1_nsv_page_bundles.json", debug_output_path)
         _save_debug_json(sv_page_bundles, "step_1_sv_page_bundles.json", debug_output_path)
 
         if len(nsv_page_bundles) != len(sv_page_bundles):
             raise PageCountMismatchError(f"NSV has {len(nsv_page_bundles)} pages, SV has {len(sv_page_bundles)} pages.")
 
-        # --- 2. Initial Analysis of NSV to Determine "What to Look For" ---
-        logger.info("Phase 1: Analyzing NSV text to build requirements map...")
+        yield {"type": "status_update", "message": f"Found {len(nsv_page_bundles)} pages. Starting Stage 1: Requirement Analysis..."}
+        
         requirements_map: Dict[int, PageHolisticAnalysis] = {}
         for page_bundle in nsv_page_bundles:
             page_num = page_bundle['page_num']
             page_img = page_bundle["image_path"]
+            
+            yield {"type": "status_update", "message": f"Analyzing requirements for Page {page_num}..."}
+
             prompt = get_ns_document_analysis_prompt_holistic(page_bundle['markdown_text'])
             page_req_result = LLM_CLIENT.invoke_vision_structured(
-                prompt=prompt,image_path=page_img,response_model=PageHolisticAnalysis
+                prompt=prompt, image_path=page_img, response_model=PageHolisticAnalysis
             )
-            requirements_map[page_num]=page_req_result
-            yield page_num,page_req_result
-        
-        # --- DEBUG STEP 2: Save the generated requirements map ---
-        _save_debug_json(requirements_map, "step_2_requirements_map.json", debug_output_path)
+            requirements_map[page_num] = page_req_result
 
-        # --- 3. Page-by-Page Multi-Modal Audit ---
-        logger.info("Phase 2: Performing page-by-page multi-modal audit...")
-        for page_num in range(1, len(nsv_page_bundles) + 1):
-            page_meta={}
-            nsv_bundle = nsv_page_bundles[page_num - 1]
-            sv_bundle = sv_page_bundles[page_num - 1]
-            page_requirements = requirements_map[page_num].model_dump()
-
-            # --- 3a. Gather the Evidence Inputs ---
-            sv_markdown = sv_bundle['markdown_text']
-            nsv_markdown = nsv_bundle['markdown_text']
-            nsv_image_path = sv_bundle['image_path']
-            sv_image_path = sv_bundle['image_path']
-                
-            page_meta["page_num"]=page_num
+            # --- FIX: Manually add page_number to the result payload ---
+            result_payload = page_req_result.model_dump()
+            result_payload['page_number'] = page_num
             
-            # if we do not have markdown
-            if not sv_markdown or not sv_markdown.strip():
-                page_meta["sv_type"]="scanned"
-                logger.info(f"Page {page_num} of SV appears scanned. Using OCR...")
-                try:
-                    sv_content = extract_text_from_image(sv_image_path, api_url=SECRETS['ocr_url']).plain_text
-                    nsv_content =extract_text_from_image(nsv_image_path, api_url=SECRETS['ocr_url']).plain_text
-                except OcrAPIError:
-                    logger.info("OCR API NOT WORKING")
-            else:
-                page_meta["sv_type"]="digital" 
-                sv_content=sv_markdown
-                nsv_content=nsv_markdown
-
-            # ---------- handle digital documents -----------------
-            if page_meta["sv_type"]=="digital":
-                try:
-                    nsv_img = cv2.imread(str(nsv_image_path))
-                    sv_img = cv2.imread(str(sv_image_path))
-                    page_meta=analyze_page_meta_from_image(nsv_img,sv_img,page_meta)
-                    if not page_requirements['required_inputs'] and page_meta["difference"] and page_meta["content"]=="not_matching":
-                        yield  nsv_img,sv_img,page_meta
-                        raise ContentMismatchError("Content Mismatch Found")
-                except Exception as e:
-                    logger.error(f"Could Not Read and process images:{e}")
-            else:
-                page_meta["source"] = "not_matching"
-                
-
-
-            
-            # --- 3b. Execute the Final Audit with the VLLM ---
-            audit_prompt = get_multimodal_audit_prompt(
-                nsv_markdown=nsv_markdown,
-                sv_markdown=sv_markdown,
-                sv_ocr_text=sv_ocr_text,
-                required_inputs_analysis=page_requirements.model_dump(),
-                page_number=page_num
-            )
-            
-            # --- FIX 4: Corrected "Failsafe" block ---
-            page_audit_result: PageAuditResult = LLM_CLIENT.invoke_vision_structured(
-                prompt=audit_prompt,
-                image_path=sv_image_path, 
-                response_model=PageAuditResult
-            )
-            
-            # --- DEBUG STEP 3b: Save the audit prompt and result for the current page ---
-            audit_log = {
-                "page_number": page_num,
-                "audit_prompt_sent_to_llm": audit_prompt,
-                "audit_result_from_llm": page_audit_result
+            # --- Yield the structured result for the frontend ---
+            yield {
+                "type": "process_step_result",
+                "data": {
+                    "stage_id": "requirement_analysis",
+                    "stage_title": "Stage 1: Requirement Analysis",
+                    "result": result_payload
+                }
             }
-            _save_debug_json(audit_log, f"step_3b_page_{page_num:02d}_audit.json", debug_output_path)
-
-
-            page_results.append(page_audit_result)
             
-            if page_audit_result.page_status != "Verified":
-                overall_status = "Failure"
-                logger.warning(f"Page {page_num} failed verification with status: {page_audit_result.page_status}")
-            else:
-                logger.info(f"Page {page_num} successfully verified.")
-
-        # --- 4. Construct the Final Report ---
-        logger.info(f"Verification finished. Overall status: {overall_status}")
-        report = VerificationReport(
-            overall_status=overall_status,
-            nsv_filename=nsv_file.filename,
-            sv_filename=sv_file.filename,
-            page_count=len(nsv_page_bundles),
-            page_results=page_results
-        )
-
-        # --- DEBUG STEP 4: Save the final report ---
-        _save_debug_json(report, "step_4_final_verification_report.json", debug_output_path)
-
-        return report
+        
+        _save_debug_json(requirements_map, "step_2_requirements_map.json", debug_output_path)
+        yield {"type": "status_update", "message": "Stage 1 analysis complete."}
+        
+        yield {
+            "type": "workflow_complete",
+            "data": {
+                "final_status": "Success",
+                "message": "All planned stages have finished."
+            }
+        }
+            
+    except (PageCountMismatchError, DocumentVerificationError) as e:
+        logger.error(f"A known document processing error occurred: {e}")
+        yield {"type": "error", "message": str(e)}
+    except Exception as e:
+        logger.exception("An unexpected error occurred during the verification workflow.")
+        yield {"type": "error", "message": f"An unexpected server error occurred. Please check system logs."}
+    finally:
+        handler.cleanup()

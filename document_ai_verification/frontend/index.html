@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document Verification</title>
+    <title>Document Verification Auditor</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,39 +15,52 @@
 
         <main>
             <div class="upload-section">
-                <!-- NSV File Input -->
+                <!-- Original (Non-Signed) PDF Input -->
                 <label for="nsv-file" class="file-upload-label">
                     <span>Original (Non-Signed) PDF</span>
                     <p class="file-name" id="nsv-file-name">Click or drop file here</p>
                 </label>
                 <input type="file" id="nsv-file" name="nsv_file" accept=".pdf" hidden>
 
-                <!-- SV File Input -->
+                <!-- Final Signed PDF Input -->
                 <label for="sv-file" class="file-upload-label">
                     <span>Final Signed PDF</span>
                     <p class="file-name" id="sv-file-name">Click or drop file here</p>
                 </label>
                 <input type="file" id="sv-file" name="sv_file" accept=".pdf" hidden>
+                <button id="verify-button" disabled>Verify Documents</button>
             </div>
 
-            <button id="verify-button" disabled>Verify Documents</button>
+            
+            <!-- NEW: Container for all dynamic output -->
+            <div id="output-container" class="hidden">
+                
+                <!-- Section for real-time status logs -->
+                <div id="log-section">
+                    <h3>Processing Log</h3>
+                    <pre id="log-stream"></pre>
+                </div>
 
-            <div id="results-section" class="hidden">
-                <h2>Verification Report</h2>
-                <div class="report-summary">
-                    <div><strong>Overall Status:</strong> <span id="overall-status"></span></div>
-                    <div><strong>Original File:</strong> <span id="nsv-filename"></span></div>
-                    <div><strong>Signed File:</strong> <span id="sv-filename"></span></div>
-                    <div><strong>Total Pages:</strong> <span id="page-count"></span></div>
+                <!-- Section for the final summary status -->
+                <div id="summary-section" class="hidden">
+                    <h3>Final Status</h3>
+                    <p id="final-status-message"></p>
                 </div>
-                <div id="page-results-container">
-                    <!-- Page-wise results will be injected here by JavaScript -->
+                
+                <!-- Container where stage results will be dynamically injected -->
+                <div id="reports-container">
+                    <!-- 
+                        JavaScript will create stage sections here. For example:
+                        <div id="results-container-requirement_analysis" class="stage-container">
+                            <h2>Stage 1: Requirement Analysis</h2>
+                            ...cards for each page will be added here...
+                        </div> 
+                    -->
                 </div>
+
             </div>
         </main>
     </div>
-
-    <!-- The log section is removed as we cannot get real-time server logs -->
 
     <script src="script.js"></script>
 </body>
