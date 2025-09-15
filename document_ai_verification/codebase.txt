@@ -1,0 +1,2647 @@
+================================================================================
+--- File: README.md ---
+================================================================================
+
+uvicorn document_ai_verification.api.main:app --reload
+
+
+================================================================================
+--- File: requirements.txt ---
+================================================================================
+
+# ===================================================================
+# Python Dependencies for Document AI Verification (Multi-Modal)
+# ===================================================================
+
+# --- Core Web Framework ---
+# For building the backend API
+fastapi
+uvicorn[standard]
+
+# --- AI & Machine Learning Clients ---
+# The official client for OpenAI-compatible APIs
+openai
+
+# --- Data Validation & Configuration ---
+pydantic
+python-dotenv
+PyYAML
+
+# --- PDF & Image Processing ---
+# The modern PDF library for splitting pages
+pypdf
+# For converting PDF pages into images (requires Poppler)
+pdf2image
+# For image manipulation (used in testing)
+Pillow
+opencv-python
+# The core library for high-quality PDF to Markdown conversion
+markitdown[pdf]
+
+# --- HTTP Requests ---
+# For making calls to the OCR and frontend API calls
+requests
+
+# --- Frontend UI ---
+streamlit
+
+# --- File Uploads ---
+# Required by FastAPI for handling file uploads
+python-multipart
+
+================================================================================
+--- File: config.yml ---
+================================================================================
+
+# ===================================================================
+# Document AI Verification Application Configuration
+# ===================================================================
+# This file contains non-secret settings for the application.
+# Secrets and API URLs should be placed in the .env file.
+
+# -------------------------------------
+# Application-Wide Settings
+# -------------------------------------
+application:
+  # Directory for storing temporary files like PDF page images during processing.
+  # This path is relative to the project root. The app will create it if it doesn't exist.
+  temp_storage_path: "temp_files"
+  
+  # Dots Per Inch (DPI) for converting PDF pages to rasterized images (e.g., PNG).
+  # Higher values result in better quality images for OCR and sign detection,
+  # but also lead to larger file sizes and longer processing times. 300 is a good balance.
+  pdf_to_image_dpi: 300
+  # --- Schedule the cleanup task to run IN THE BACKGROUND ---
+  # This will delete the directory 10 minutes (600 seconds) after the stream is done.
+  temp_storage_cleanup_delay_seconds: 600  # Time in seconds to keep temp files before cleanup (default: 10 minutes)
+# -------------------------------------
+# AI Service Parameters
+# -------------------------------------
+ai_services:
+  # Default parameters for the Large Language Model (LLM) client.
+  # These values can be overridden on a per-call basis if needed.
+  llm:
+    # Controls the randomness of the output. A value of 0.0 is deterministic,
+    # which is ideal for structured data extraction to ensure consistent results.
+    temperature: 0.0
+    
+    # The maximum number of new tokens the model is allowed to generate in a single response.
+    # Set this to a reasonable value to prevent runaway generation and control costs/latency.
+    max_new_tokens: 2048
+
+  
+  # Parameters for the OCR service. This section is included for future-proofing
+  # in case the OCR service adds configurable parameters later.
+  ocr: {}
+
+================================================================================
+--- File: .env.example ---
+================================================================================
+
+# openai compatible 
+LLM_API_URL="your-api-url for Vllm served open ai model"
+LLM_API_KEY="Your Secret Key" 
+LLM_MODEL_NAME="your model name"
+
+# Full endpoint for the English OCR service
+OCR_URL="your-api-url for OCR Service"
+
+================================================================================
+--- File: utils/text_utils.py ---
+================================================================================
+
+import difflib
+import json
+
+def get_structured_diff_json(text1: str, text2: str) -> str:
+    """
+    Compares two strings and returns a JSON string detailing the differences.
+
+    The function identifies additions, deletions, replacements, and equal parts,
+    providing line numbers and the text content for each segment.
+
+    Args:
+        text1: The first string (original text).
+        text2: The second string (new text).
+
+    Returns:
+        A JSON formatted string representing the list of differences.
+    """
+    # Split texts into lines for comparison
+    text1_lines = text1.splitlines()
+    text2_lines = text2.splitlines()
+
+    # Create a SequenceMatcher instance
+    matcher = difflib.SequenceMatcher(None, text1_lines, text2_lines)
+
+    diff_list = []
+
+    # get_opcodes() returns a list of 5-tuples describing the differences
+    # (tag, i1, i2, j1, j2)
+    # tag: 'replace', 'delete', 'insert', 'equal'
+    # i1:i2: slice indices for text1
+    # j1:j2: slice indices for text2
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        # We don't need to include the 'equal' parts in the JSON
+        # but you could if you wanted a complete representation of the file
+        if tag == 'equal':
+            continue
+
+        change_type = tag.capitalize() # 'replace' -> 'Replace'
+        if tag == 'insert':
+            change_type = 'Addition'
+        elif tag == 'delete':
+            change_type = 'Deletion'
+        
+        diff_list.append({
+            "type": change_type,
+            "original_lines": {
+                "start": i1 + 1,
+                "end": i2,
+                "content": "\n".join(text1_lines[i1:i2])
+            },
+            "new_lines": {
+                "start": j1 + 1,
+                "end": j2,
+                "content": "\n".join(text2_lines[j1:j2])
+            }
+        })
+
+    # Convert the list of dictionaries to a JSON string
+    return json.dumps(diff_list, indent=4)
+
+
+================================================================================
+--- File: utils/file_utils.py ---
+================================================================================
+
+# document_ai_verification/utils/file_utils.py
+
+import logging
+import shutil
+import io
+from pathlib import Path
+from typing import List, Dict, Any
+from uuid import uuid4
+
+# --- Pre-requisite Check & Imports ---
+try:
+    from pdf2image import convert_from_path
+    from pypdf import PdfReader, PdfWriter
+    from markitdown import MarkItDown
+    from fastapi import UploadFile
+except ImportError:
+    import sys
+    sys.exit("Required libraries not found. Run: pip install -r requirements.txt")
+
+# --- Setup ---
+logger = logging.getLogger(__name__)
+
+# CRITICAL REMINDER: pdf2image requires the 'poppler' utility to be installed on the system.
+# Ubuntu/Debian: sudo apt-get install poppler-utils
+# Mac (Homebrew): brew install poppler
+
+class TemporaryFileHandler:
+    """
+    Manages the lifecycle of temporary files for a single verification request.
+    Can be used as a context manager (`with`) or controlled manually (`setup`/`cleanup`).
+    """
+    def __init__(self, base_path: str = "temp_files"):
+        self.request_id = str(uuid4())
+        self.temp_dir = Path(base_path) / self.request_id
+
+    def setup(self):
+        """Creates the temporary directory."""
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created temporary directory for request: {self.temp_dir}")
+
+    def cleanup(self):
+        """Removes the temporary directory and all its contents."""
+        try:
+            if self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+                logger.info(f"Successfully cleaned up temporary directory: {self.temp_dir}")
+        except OSError as e:
+            logger.error(f"Failed to clean up temporary directory {self.temp_dir}: {e}")
+        
+    def __enter__(self):
+        """Context manager entry point. Calls setup."""
+        self.setup()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit point. Calls cleanup."""
+        self.cleanup()
+            
+    # --- NEW: Method to save raw bytes to a file ---
+    def save_bytes_as_file(self, file_bytes: bytes, filename: str) -> Path:
+        """Saves a byte string to a file in the temporary directory."""
+        file_path = self.temp_dir / filename
+        with open(file_path, "wb") as buffer:
+            buffer.write(file_bytes)
+        logger.info(f"Saved bytes to file '{filename}' at '{file_path}'")
+        return file_path
+    
+    # This method can now be deprecated or removed if you only use the byte-based approach
+    async def save_upload_file(self, upload_file: UploadFile) -> Path:
+        """Saves a FastAPI UploadFile to the temporary directory."""
+        await upload_file.seek(0)
+        file_path = self.temp_dir / upload_file.filename
+        try:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(upload_file.file, buffer)
+            logger.info(f"Saved uploaded file '{upload_file.filename}' to '{file_path}'")
+            return file_path
+        finally:
+            pass
+
+    def extract_content_per_page(self, pdf_path: Path, dpi: int = 300) -> List[Dict[str, Any]]:
+        """
+        The master utility for multi-modal PDF processing. For each page, it extracts:
+        1. A high-quality PNG image.
+        2. Structured Markdown text (if the page is digital).
+        """
+        # ... (The rest of this function remains exactly the same) ...
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF file not found at {pdf_path}")
+
+        # --- Step 1: Convert all pages to images in a single, efficient batch ---
+        image_output_dir = self.temp_dir / f"{pdf_path.stem}_images"
+        image_output_dir.mkdir(exist_ok=True)
+        logger.info(f"Batch converting '{pdf_path.name}' to images...")
+        try:
+            convert_from_path(
+                pdf_path=pdf_path, dpi=dpi, output_folder=image_output_dir,
+                fmt="png", thread_count=4, output_file=f"{pdf_path.stem}_page_"
+            )
+            image_paths = sorted(list(image_output_dir.glob("*.png")))
+            logger.info(f"Successfully converted PDF to {len(image_paths)} images.")
+        except Exception as e:
+            logger.error(f"Critical error during image conversion. Check Poppler installation. Error: {e}")
+            raise
+
+        # --- Step 2: Extract Markdown per page using an efficient in-memory process ---
+        logger.info(f"Extracting Markdown from '{pdf_path.name}' page by page (in-memory)...")
+        markdown_texts = []
+        md_converter = MarkItDown()
+        try:
+            reader = PdfReader(pdf_path)
+            for i, page in enumerate(reader.pages):
+                writer = PdfWriter()
+                writer.add_page(page)
+                
+                with io.BytesIO() as bytes_stream:
+                    writer.write(bytes_stream)
+                    bytes_stream.seek(0)
+                    
+                    result = md_converter.convert_stream(bytes_stream)
+                    markdown_texts.append(result.text_content or "")
+            
+            logger.info(f"Successfully extracted Markdown from {len(markdown_texts)} pages.")
+        except Exception as e:
+            logger.error(f"Error during in-memory Markdown extraction: {e}")
+            markdown_texts = [""] * len(image_paths)
+
+        # --- Step 3: Combine results into the final structured list ---
+        if len(image_paths) != len(markdown_texts):
+            raise ValueError("Mismatch between number of images and extracted markdown pages.")
+
+        page_bundles = []
+        for i in range(len(image_paths)):
+            page_bundles.append({
+                "page_num": i + 1,
+                "markdown_text": markdown_texts[i],
+                "image_path": image_paths[i]
+            })
+            
+        return page_bundles
+
+
+# ===================================================================
+# Standalone Test Block (No changes needed)
+# ===================================================================
+if __name__ == "__main__":
+    # ... (your test block will continue to work as is) ...
+    pass
+
+================================================================================
+--- File: utils/image_utils.py ---
+================================================================================
+
+# document_ai_verification/utils/image_utils.py
+
+import cv2
+import numpy as np
+from typing import Dict, List, Tuple
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+def find_difference_bboxes_direct(img1: np.ndarray, img2: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """
+    Finds the bounding boxes of differences between two images.
+    """
+    if img1 is None or img2 is None:
+        return []
+    
+    # Convert to grayscale for more reliable difference detection
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    
+    diff = cv2.absdiff(gray1, gray2)
+    _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(thresh, kernel, iterations=2)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    bounding_boxes = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        # Add a small padding for better visibility
+        padding = 5
+        bounding_boxes.append((x-padding, y-padding, x + w + padding, y + h + padding))
+    return bounding_boxes
+
+def generate_difference_images(
+    original_img: np.ndarray,
+    signed_img: np.ndarray,
+    bboxes: List[Tuple[int, int, int, int]],
+    output_dir: Path
+) -> Tuple[Path, Path]:
+    """
+    Generates two images with colored bounding boxes indicating differences.
+    - Original image gets GREEN boxes.
+    - Signed image gets RED boxes.
+
+    Args:
+        original_img: The original page image.
+        signed_img: The signed page image.
+        bboxes: A list of bounding box tuples (x1, y1, x2, y2).
+        output_dir: The directory to save the new images in.
+
+    Returns:
+        A tuple containing the paths to the (original_diff_image, signed_diff_image).
+    """
+    output_dir.mkdir(exist_ok=True) # Ensure the output directory exists
+    
+    # --- Define colors (BGR format) ---
+    green = (0, 255, 0)
+    red = (0, 0, 255)
+    thickness = 2
+
+    # --- Process Original Image (Green Boxes) ---
+    original_with_boxes = original_img.copy()
+    for (x1, y1, x2, y2) in bboxes:
+        cv2.rectangle(original_with_boxes, (x1, y1), (x2, y2), green, thickness)
+    original_output_path = output_dir / "diff_original.png"
+    cv2.imwrite(str(original_output_path), original_with_boxes)
+    logger.info(f"Saved original difference image to {original_output_path}")
+
+    # --- Process Signed Image (Red Boxes) ---
+    signed_with_boxes = signed_img.copy()
+    for (x1, y1, x2, y2) in bboxes:
+        cv2.rectangle(signed_with_boxes, (x1, y1), (x2, y2), red, thickness)
+    signed_output_path = output_dir / "diff_signed.png"
+    cv2.imwrite(str(signed_output_path), signed_with_boxes)
+    logger.info(f"Saved signed difference image to {signed_output_path}")
+    
+    return (original_output_path, signed_output_path)
+
+
+def analyze_page_meta_from_image(nsv_img: np.ndarray, sv_img: np.ndarray) -> Dict:
+    """
+    Analyzes and updates page metadata based on image comparison.
+    Returns a dictionary with the analysis results.
+    """
+    analysis = {}
+    if nsv_img is None or sv_img is None:
+        analysis["source_match"] = False
+        analysis["content_match"] = False
+        analysis["difference_bboxes"] = []
+        return analysis
+    
+    # Ensure images have the same dimensions for accurate comparison
+    resized_sv_img = sv_img
+    if nsv_img.shape != sv_img.shape:
+        h, w, _ = nsv_img.shape
+        resized_sv_img = cv2.resize(sv_img, (w, h))
+        analysis["source_match"] = False
+    else:
+        analysis["source_match"] = True
+    
+    difference = cv2.subtract(nsv_img, resized_sv_img)
+    b, g, r = cv2.split(difference)
+    
+    if cv2.countNonZero(b) == 0 and cv2.countNonZero(g) == 0 and cv2.countNonZero(r) == 0:
+        analysis["content_match"] = True
+        analysis["difference_bboxes"] = []
+    else:
+        analysis["content_match"] = False
+        analysis["difference_bboxes"] = find_difference_bboxes_direct(nsv_img, resized_sv_img)
+        
+    return analysis
+
+================================================================================
+--- File: utils/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: utils/config_loader.py ---
+================================================================================
+
+# document_ai_verification/utils/config_loader.py
+
+import os
+from pathlib import Path
+from functools import lru_cache
+import logging
+import sys
+
+from dotenv import load_dotenv
+
+# --- Pre-requisite Check ---
+try:
+    import yaml
+except ImportError:
+    # This is a critical dependency, so we exit if it's not found.
+    sys.exit("PyYAML is not installed. Please install it with: pip install pyyaml")
+
+# --- Setup ---
+logger = logging.getLogger(__name__)
+
+# Dynamically determine the project's root directory.
+# This script is in '.../utils/config_loader.py', so the root is two levels up.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+@lru_cache(maxsize=None)
+def load_settings() -> dict:
+    """
+    Loads all settings from .env and config.yml files, caching the result.
+
+    This function is designed to be called once. The lru_cache decorator ensures
+    that the files are not read from the disk on subsequent calls.
+
+    Returns:
+        dict: A nested dictionary containing all application settings.
+
+    Raises:
+        FileNotFoundError: If the .env or config.yml file is missing.
+    """
+    # --- 1. Load Secrets from .env file ---
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        msg = f"CRITICAL: Environment file (.env) not found at {env_path}. The application cannot start."
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+    
+    load_dotenv(dotenv_path=env_path)
+    
+    secrets = {
+        "llm_api_url": os.getenv("LLM_API_URL"),
+        "llm_api_key": os.getenv("LLM_API_KEY", ""), # Default to empty string if not set
+        "llm_model_name": os.getenv("LLM_MODEL_NAME"),
+        "ocr_url": os.getenv("OCR_URL"),
+    }
+    
+    # Validate that essential secrets are present
+    for key, value in secrets.items():
+        if key != "llm_api_key" and not value: # API key is optional
+            msg = f"CRITICAL: Required secret '{key.upper()}' not found in .env file."
+            logger.error(msg)
+            raise ValueError(msg)
+
+    # --- 2. Load Parameters from config.yml file ---
+    config_path = PROJECT_ROOT / "config.yml"
+    if not config_path.exists():
+        msg = f"CRITICAL: Configuration file (config.yml) not found at {config_path}. The application cannot start."
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+
+    with open(config_path, "r") as f:
+        app_config = yaml.safe_load(f)
+
+    # --- 3. Combine and Return ---
+    settings = {
+        "secrets": secrets,
+        "config": app_config
+    }
+    
+    logger.info("Application settings loaded successfully.")
+    return settings
+
+# ===================================================================
+# Standalone Test Block
+# ===================================================================
+if __name__ == "__main__":
+    import json
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    print("--- Running Config Loader Test ---")
+    try:
+        # Call the function to load and cache the settings
+        app_settings = load_settings()
+        
+        print("\n✅ Settings loaded successfully!")
+        
+        # Pretty-print the loaded settings for verification
+        # Using json.dumps for clean, indented output
+        print("\n--- Loaded Settings ---")
+        print(json.dumps(app_settings, indent=2))
+        print("-----------------------")
+        
+        # You can access nested settings like this:
+        print(f"\nExample Access:")
+        print(f"LLM Model: {app_settings['secrets']['llm_model_name']}")
+        print(f"PDF DPI:   {app_settings['config']['application']['pdf_to_image_dpi']}")
+
+    except (FileNotFoundError, ValueError) as e:
+        print(f"\n❌ Test Failed: Could not load settings. Reason: {e}")
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+
+================================================================================
+--- File: ai/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: ai/llm/schemas.py ---
+================================================================================
+
+# document_ai_verification/ai/llm/schemas.py
+
+from typing import List, Literal
+from pydantic import BaseModel, Field
+
+# ===================================================================
+# SECTION 1: Schemas for the Initial NSV Analysis
+# ===================================================================
+
+
+class RequiredInput(BaseModel):
+    """
+    Represents a single input field identified in the non-signed document that requires user input.
+    """
+    input_type: str = Field(..., description="The type of input required (e.g., 'signature', 'date', 'full_name').")
+    marker_text: str = Field(..., description="The unique text label that identifies the input field.")
+    description: str = Field(..., description="A brief, human-readable explanation of what is required.")
+
+class PrefilledInput(BaseModel):
+    """
+    Represents a single prefilled field identified in the non-signed document.
+    """
+    input_type: str = Field(..., description="The type of input (e.g., 'signature', 'date', 'full_name').")
+    marker_text: str = Field(..., description="The unique text label that identifies the field.")
+    value: str = Field(..., description="The filled value, or 'SIGNED' for signatures, 'CHECKED' for checkboxes, etc.")
+
+class PageHolisticAnalysis(BaseModel):
+    """
+    The holistic analysis of a single NSV page, listing required inputs, prefilled fields, and a summary.
+    This is the target schema for the 'get_ns_document_analysis_prompt_holistic'.
+    """
+    required_inputs: List[RequiredInput] = Field(default_factory=list)
+    prefilled_inputs: List[PrefilledInput] = Field(default_factory=list)
+    summary: str = Field(..., description="A short summary of the prefilled and required fields, e.g., 'No fields are filled' or 'One party filled name, date, and signature; other party fields are blank.'")
+
+
+
+# ===================================================================
+# SECTION 2: Schemas for the Final Multi-Modal Audit
+# ===================================================================
+# These models define the structure for the most complex LLM call, the final page audit.
+
+# Define literal types for status fields to enforce consistency in the LLM's output.
+PageStatus = Literal["Verified", "Input Missing", "Content Mismatch", "Input Missing and Content Mismatch"]
+
+class AuditedInput(BaseModel):
+    """
+    Represents the audit result for a single required input field.
+    """
+    input_type: str = Field(..., description="The type of input that was required.")
+    marker_text: str = Field(..., description="The text label identifying the input field.")
+    is_fulfilled: bool = Field(..., description="True if the input was fulfilled, False if missing.")
+    audit_notes: str = Field(..., description="The AI's notes supporting its fulfillment decision.")
+
+class AuditedContentDifference(BaseModel):
+    """
+    Represents a detected unauthorized change in the static content.
+    """
+    nsv_text: str = Field(..., description="The original text snippet from the NSV.")
+    sv_text: str = Field(..., description="The corresponding altered text snippet from the SV.")
+    description: str = Field(..., description="A concise explanation of the unauthorized change.")
+
+class PageAuditResult(BaseModel):
+    """
+    The complete audit results for a single document page.
+    This is the target schema for the 'get_multimodal_audit_prompt'.
+    """
+    page_number: int = Field(..., description="The page number being audited (1-indexed).")
+    page_status: PageStatus = Field(..., description="The overall status of the page based on the audit.")
+    required_inputs: List[AuditedInput] = Field(default_factory=list)
+    content_differences: List[AuditedContentDifference] = Field(default_factory=list)
+
+================================================================================
+--- File: ai/llm/client.py ---
+================================================================================
+
+import os
+import json
+import logging
+import base64
+from pathlib import Path
+from dotenv import load_dotenv
+from openai import OpenAI, APIError, BadRequestError
+from typing import Generator, Any, Type, TypeVar, List
+from pydantic import BaseModel, Field
+
+def build_structured_prompt(prompt: str, response_model: Type[BaseModel]) -> str:
+    """
+    Constructs a standardized prompt for forcing a model to generate a
+    JSON object that conforms to a given Pydantic model's schema.
+    
+    Args:
+        prompt (str): The core user prompt or request.
+        response_model (Type[BaseModel]): The Pydantic model for the desired output.
+
+    Returns:
+        str: A fully formatted prompt ready for an LLM.
+    """
+    # Generate the JSON schema from the Pydantic model.
+    schema = json.dumps(response_model.model_json_schema(), indent=2)
+
+    # Engineer a new prompt that includes the original prompt and instructions.
+    structured_prompt = f"""
+    Given the following request:
+    ---
+    {prompt}
+    ---
+    Your task is to provide a response as a single, valid JSON object that strictly adheres to the following JSON Schema.
+    Do not include any extra text, explanations, or markdown formatting (like ```json) outside of the JSON object itself.
+
+    JSON Schema:
+    {schema}
+    """
+    return structured_prompt
+
+
+# Load environment variables from a .env file
+load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Generic type variable for Pydantic models for clean type hinting.
+PydanticModel = TypeVar("PydanticModel", bound=BaseModel)
+
+class ContextLengthExceededError(Exception):
+    """Custom exception for when a prompt exceeds the model's context window."""
+    pass
+
+def encode_image_to_base64(image_path: Path) -> str:
+    """Reads an image file and returns its base64 encoded string."""
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except Exception as e:
+        logging.error(f"Error encoding image {image_path}: {e}")
+        raise
+
+class LLMService:
+    """
+    A synchronous client for OpenAI-compatible APIs using the 'openai' library.
+    """
+    def __init__(self,api_key:str ,model: str, base_url: str, max_context_tokens: int):
+        self.model = model
+        self.max_context_tokens = max_context_tokens
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        
+        print(f"✅ LLMService (Sync) initialized for model '{self.model}' with max_tokens={self.max_context_tokens}.")
+
+    def invoke(self, prompt: str, **kwargs: Any) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = self.client.chat.completions.create(model=self.model, messages=messages, **kwargs)
+            return response.choices[0].message.content or ""
+        except BadRequestError as e:
+            if "context length" in str(e).lower() or "too large" in str(e).lower():
+                logging.error(f"Prompt exceeded context window for model {self.model}.")
+                raise ContextLengthExceededError(f"Prompt is too long for the model's {self.max_context_tokens} token limit.") from e
+            else:
+                logging.error(f"Unhandled BadRequestError during invoke: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An error occurred during invoke: {e}", exc_info=True)
+            raise
+
+    def stream(self, prompt: str, **kwargs: Any) -> Generator[str, None, None]:
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            stream = self.client.chat.completions.create(model=self.model, messages=messages, stream=True, **kwargs)
+            for chunk in stream:
+                content_chunk = chunk.choices[0].delta.content
+                if content_chunk:
+                    yield content_chunk
+        except BadRequestError as e:
+            if "context length" in str(e).lower() or "too large" in str(e).lower():
+                logging.error(f"Prompt exceeded context window for model {self.model}.")
+                raise ContextLengthExceededError(f"Prompt is too long for the model's {self.max_context_tokens} token limit.") from e
+            else:
+                logging.error(f"Unhandled BadRequestError during stream: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An error occurred during stream: {e}", exc_info=True)
+            raise
+
+    def invoke_structured(
+        self, prompt: str, response_model: Type[PydanticModel], **kwargs: Any
+    ) -> PydanticModel:
+        # --- MODIFIED: Use the shared utility function ---
+        structured_prompt = build_structured_prompt(prompt, response_model)
+        messages = [{"role": "user", "content": structured_prompt}]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=messages, response_format={"type": "json_object"}, **kwargs
+            )
+            json_response_str = response.choices[0].message.content
+            if not json_response_str:
+                raise ValueError("The model returned an empty response.")
+            return response_model.model_validate_json(json_response_str)
+        except BadRequestError as e:
+            if "context length" in str(e).lower() or "too large" in str(e).lower():
+                logging.error(f"Prompt exceeded context window for model {self.model}.")
+                raise ContextLengthExceededError(f"Prompt is too long for the model's {self.max_context_tokens} token limit.") from e
+            else:
+                logging.error(f"Unhandled BadRequestError during structured invoke: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An error occurred during structured invoke: {e}", exc_info=True)
+            raise
+    
+
+    def invoke_vision_structured(
+        self, prompt: str, image_path: Path, response_model: Type[PydanticModel], **kwargs: Any
+    ) -> PydanticModel:
+        """
+        Sends a text prompt and an image to the VLLM and parses a structured JSON response.
+        """
+        logging.info(f"Performing vision call for image: {image_path.name}")
+        base64_image = encode_image_to_base64(image_path)
+        
+        structured_prompt = build_structured_prompt(prompt, response_model)
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": structured_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    },
+                ],
+            }
+        ]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=messages, response_format={"type": "json_object"}, **kwargs
+            )
+            json_response_str = response.choices[0].message.content
+            if not json_response_str:
+                raise ValueError("The vision model returned an empty response.")
+            return response_model.model_validate_json(json_response_str)
+        except Exception as e:
+            logging.error(f"An error occurred during structured vision invoke: {e}  value: {json_response_str}", exc_info=True)
+            raise
+    
+    def invoke_image_compare_structured(
+        self, prompt: str, image_path_1: Path, image_path_2: Path, response_model: Type[PydanticModel], **kwargs: Any
+    ) -> PydanticModel:
+        """
+        Sends a text prompt and two images to the VLLM for comparison and parses a structured JSON response.
+
+        Args:
+            prompt (str): The text prompt describing the comparison task.
+            image_path_1 (Path): Path to the first image file.
+            image_path_2 (Path): Path to the second image file.
+            response_model (Type[PydanticModel]): The Pydantic model to structure the response.
+            **kwargs: Additional arguments to pass to the API (e.g., temperature, max_tokens).
+
+        Returns:
+            PydanticModel: The parsed response conforming to the specified model.
+
+        Raises:
+            ValueError: If the model returns an empty response.
+            ContextLengthExceededError: If the prompt exceeds the model's context window.
+            Exception: For other API or processing errors.
+        """
+        logging.info(f"Performing vision-based comparison for images: {image_path_1.name} and {image_path_2.name}")
+        
+        # Encode both images to base64
+        base64_image_1 = encode_image_to_base64(image_path_1)
+        base64_image_2 = encode_image_to_base64(image_path_2)
+        
+        # Build the structured prompt
+        structured_prompt = build_structured_prompt(prompt, response_model)
+        
+        # Construct the message with text prompt and two images
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": structured_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image_1}"},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image_2}"},
+                    },
+                ],
+            }
+        ]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, 
+                messages=messages, 
+                response_format={"type": "json_object"}, 
+                **kwargs
+            )
+            json_response_str = response.choices[0].message.content
+            if not json_response_str:
+                raise ValueError("The vision model returned an empty response.")
+            return response_model.model_validate_json(json_response_str)
+        except BadRequestError as e:
+            if "context length" in str(e).lower() or "too large" in str(e).lower():
+                logging.error(f"Prompt exceeded context window for model {self.model}.")
+                raise ContextLengthExceededError(
+                    f"Prompt is too long for the model's {self.max_context_tokens} token limit."
+                ) from e
+            else:
+                logging.error(f"Unhandled BadRequestError during structured image comparison invoke: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An error occurred during structured image comparison invoke: {e}", exc_info=True)
+            raise
+
+if __name__ == '__main__':
+    # --- Setup and Initialization ---
+    project_root = Path(__file__).resolve().parent.parent.parent
+    load_dotenv(dotenv_path=project_root / ".env")
+    # Use the same sample image as other tests
+    sample_image_path = project_root / "sample_document.png"
+
+    # --- Setup and Initialization ---
+    print("--- Running Synchronous LLMService Tests ---")
+    
+    model = os.getenv("LLM_MODEL_NAME")
+    base_url = os.getenv("LLM_API_URL")
+    api_key=os.getenv("LLM_API_KEY")
+    llm_service = None
+    if all([model, base_url]):
+        llm_service = LLMService(api_key,model, base_url, max_context_tokens=131072 )
+    else:
+        print("\nWARNING: Small LLM environment variables not set. Skipping tests for small model.")
+
+    
+
+================================================================================
+--- File: ai/llm/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: ai/llm/prompts.py ---
+================================================================================
+
+import json
+# document_ai_verification/ai/llm/prompts.py
+
+def get_ns_document_analysis_prompt_holistic(page_text_content: str) -> str:
+    """
+    Generates a merged, gigantic prompt to instruct an LLM with vision capabilities to holistically analyze the text and image of a
+    non-signed document page, identify all required user inputs (excluding pre-filled fields with strong emphasis on accuracy),
+    catalog pre-filled fields separately (with special emphasis on detecting signatures, dates, names, checkboxes, etc.),
+    and provide a short summary of the overall status. This merges the strengths of both non-holistic (precise requirement detection)
+    and holistic approaches, ensuring nothing is missed.
+    """
+    prompt = f"""
+    **Your Role:** You are a hyper-attentive, detail-oriented document processing specialist with extensive experience in form analysis, data extraction, and vision-enhanced processing. Your expertise lies in meticulously reviewing textual content and images from various documents, such as legal forms, applications, contracts, and administrative paperwork, to pinpoint every instance where a user must provide personal input or where fields are already pre-filled. You approach this task with precision, ensuring no potential field—blank or filled—is overlooked, while strictly adhering to predefined guidelines to maintain consistency and accuracy. Emphasize thorough cross-verification between text and image to avoid missing any details, especially pre-filled signatures, which must be detected via visual cues like handwritten squiggles or electronic marks.
+
+    **Your Task:** Carefully examine the provided text from a single page of a non-signed document and the accompanying image. Your objective is to identify and catalog all locations where the document explicitly or implicitly requires a user to enter information (blank fields) in 'required_inputs', all pre-filled fields in 'prefilled_inputs', and provide a concise summary in 'summary'. Exclude any pre-filled fields from 'required_inputs' with absolute certainty. This merged analysis combines precise detection of required inputs (ensuring all blanks are captured without fabrication) with holistic cataloging of pre-filled items, crucial for automating document preparation processes. Your output must be thorough, reliable, and formatted exactly as specified. Do not miss any fields: double-check for signatures, dates, names, checkboxes, initials, addresses, and other inputs in both text and image.
+
+    **Critical Instructions:**
+    1. **Analyze Text and Image Together:** Use the provided text (extracted from the document) and the image to identify input fields, both blank and pre-filled. The text provides explicit labels, context, and sometimes filled data, while the image may reveal visual cues such as blank lines, underscores, checkboxes, handwritten/printed content indicating filled fields, signatures (which appear as unique squiggly lines or marks), checked boxes (with ticks, crosses, or fills), or other indicators. Cross-reference both meticulously to ensure accuracy—resolve any discrepancies by prioritizing visual evidence from the image for filled status (e.g., if text shows blanks but image shows handwriting, mark as pre-filled).
+
+    2. **Identify the Marker Text:** For each input field (blank or pre-filled), locate and extract the exact, unique, machine-printed text label or phrase that is immediately adjacent to or directly associated with the field. This "marker_text" serves as a reliable anchor for later verification and must be copied verbatim from the document text without any alterations, paraphrasing, or summarization. For example:
+       - Correct: "Signature of Applicant:"
+       - Incorrect: "applicant's signature" (this is paraphrased and lacks the original punctuation and capitalization).
+       Focus on text that clearly indicates a field is present, such as labels ending with colons, underscores, or blank lines described in the text. Ensure marker_text includes any relevant symbols like □ for checkboxes if present in the text. Emphasize: Do not miss subtle markers near potential signatures or other fields.
+
+    3. **Determine the Input Type:** Classify each identified field (blank or pre-filled) into one of the following predefined categories based on the context and marker text from the text, combined with visual cues from the image:
+       - 'signature': For fields requiring a handwritten or electronic signature (e.g., "Signature:", "Sign Here:"). Emphasize detection: If the image shows any squiggly line, name-like script, or mark in the signature area, classify as pre-filled with value 'SIGNED'.
+       - 'date': For fields requiring a date entry (e.g., "Date:", "Date of Birth:"). If filled, extract the exact date string.
+       - 'full_name': For fields requiring the user's full printed name (e.g., "Print Name:", "Full Name:"). If filled, extract the name text.
+       - 'initials': For fields requiring initials (e.g., "Initial Here:", "Applicant's Initials:"). If filled, extract initials if readable, else 'INITIALED'.
+       - 'checkbox': For fields involving checking or marking a box (e.g., "Check if Applicable □", "Yes/No □"). Emphasize: Use image to confirm if checked (tick, cross, fill)—if yes, value 'CHECKED'; if unchecked, it's required.
+       - 'address': For fields requiring an address (e.g., "Mailing Address:", "Street Address:"). Treat multi-part as one unless distinctly separate.
+       - 'other': For any input that doesn't fit the above categories, such as phone numbers, email, or custom text (e.g., "Phone Number:", "Email Address:"). If filled, extract the text.
+       Use only these types; do not invent new ones. Base your classification on the most logical fit from the surrounding text and image. Emphasize: Thoroughly scan for all possible types without omission.
+
+    4. **Catalog Required (Blank) Fields:** For fields that are completely blank in both text (e.g., no data after label) and image (no handwriting, marks, or fills visible), include them in 'required_inputs'. This mirrors precise requirement detection: Only include if truly blank and requiring input. Provide:
+       - input_type: As classified.
+       - marker_text: Exact verbatim label.
+       - description: A brief, concise, human-readable explanation of what the user is expected to provide. This should be 1-2 sentences at most, focusing on clarity without unnecessary details (e.g., "User must provide their full printed name in this field." or "User must sign here to acknowledge the terms."). Ensure no pre-filled fields sneak into this list—double-check image for subtle fills like faint signatures.
+
+    5. **Exclude and Catalog Pre-Filled Fields:** Do NOT include any fields that are already filled in 'required_inputs'—this is crucial; always exclude them rigorously as per text and image evidence. Instead, catalog them in 'prefilled_inputs'. Filled status is indicated by:
+       - Text content: If the text explicitly states a field contains data (e.g., "Name: John Doe" or "Date: 01/01/2023"), include as pre-filled.
+       - Image content: If the image shows handwritten or printed text, signatures (squiggly lines), dates, checked boxes (ticks/fills), initials, or any content in the field, include as pre-filled, even if text suggests a blank (e.g., "Signature: ________" in text but visible signature in image = pre-filled with 'SIGNED'). Emphasize: Special attention to signatures—do not miss them; look for any non-blank visual elements in signature areas.
+       For each pre-filled field, provide:
+       - input_type: As classified.
+       - marker_text: Exact verbatim label.
+       - value: Extract or describe the filled content precisely. For text/date/address/other: the exact readable text (use OCR-like vision to read from image if not in text). For signature: "SIGNED" (do not attempt to read names from signatures). For checkbox: "CHECKED". For initials: the initials if clearly readable (e.g., 'JD'), else "INITIALED". If value can't be precisely read (e.g., illegible handwriting), use "FILLED". Only include filled fields here; never blanks.
+
+    6. **Provide a Description for Required Inputs:** Ensure each required_input has a brief, concise explanation, reflecting the input type and context, without redundancy.
+
+    7. **Generate Summary:** Provide a short summary (1-2 sentences) of the overall status, inferring multi-party contexts if applicable (e.g., sections for 'Buyer' and 'Seller', where one might have filled their parts). Describe what's filled vs. blank, listing key items. Examples:
+       - "No fields are prefilled; all identified fields require user input including name, date, and signature."
+       - "One party has filled their name, date, and signature; the other party's corresponding fields remain blank and require input."
+       - "Several checkboxes are checked, a date is provided, and a signature is signed; full name and address are blank." Emphasize completeness: Mention if signatures or other crucial fields are pre-filled or required.
+
+    8. **Handle Variations and Edge Cases:** Documents may present fields in diverse ways—recognize and handle all without missing:
+       - Underscores or blank lines: Text like "Name: ____________________" or blank line in image = blank 'full_name' unless filled in image.
+       - Bracketed or parenthetical instructions: "Signature (required):" with signature in image = pre-filled 'signature' with "SIGNED".
+       - Checkbox descriptions: "□ Agree to Terms" = 'checkbox' with marker_text "□ Agree to Terms" (include symbol); unchecked = required, checked = pre-filled "CHECKED".
+       - Multi-part fields: "Address: Street ________ City ________ State ____ Zip ____" = one 'address' if all blank or all filled; if partially filled, mark as pre-filled or split into separate if markers allow.
+       - Implicit fields: "Please sign and date below" followed by blanks = separate 'signature' and 'date'; if image shows signature but blank date, pre-filled signature, required date.
+       - Pre-filled by one party: E.g., in multi-party docs, catalog one side's filled signatures/names/dates as pre-filled, other's blanks as required; note in summary.
+       Emphasize: For signatures, always check image carefully—do not miss pre-filled ones; if any mark present, it's "SIGNED".
+
+    9. **Examples of Analysis:** To guide your reasoning, consider these merged illustrative examples:
+       - Example 1: Text: "Employee Name: ____________________"; Image: Blank line. Output: required_inputs with input_type='full_name', marker_text='Employee Name:', description='User must print their full name here.'; prefilled_inputs empty; summary='No fields are prefilled; full name requires input.'.
+       - Example 2: Text: "□ I accept the conditions"; Image: Unchecked box. Output: required_inputs with input_type='checkbox', marker_text='□ I accept the conditions', description='User must check this box to indicate acceptance.'; prefilled_inputs empty; summary='No fields are prefilled; checkbox requires input.'.
+       - Example 3: Text: "Signature: ________ Date: 01/01/2023"; Image: Blank signature area, filled date text. Output: required_inputs with input_type='signature', marker_text='Signature:', description='User must provide their signature.'; prefilled_inputs with input_type='date', marker_text='Date:', value='01/01/2023'; summary='The date is prefilled; signature remains blank and requires input.'.
+       - Example 4: Text: "Initial each page: ____"; Image: Handwritten initials. Output: required_inputs empty; prefilled_inputs with input_type='initials', marker_text='Initial each page:', value='FILLED' (or exact if readable); summary='Initials are prefilled; no required inputs.'.
+       - Example 5: Text: "Signature: ________"; Image: Squiggly signature line. Output: required_inputs empty; prefilled_inputs with input_type='signature', marker_text='Signature:', value='SIGNED'; summary='The signature is prefilled; no blank fields require input.'.
+       - Example 6: Text and Image: Purely instructional paragraphs with no blanks or labels. Output: Empty lists for required_inputs and prefilled_inputs; summary='No fields present on this page; purely informational content.'.
+
+    10. **Handle the "No Inputs/Fields" Case:** If the page consists solely of informational content, instructions, or static text without any fields, labels, or indicators for input (blank or filled) in both text and image, you MUST return empty lists for 'required_inputs' and 'prefilled_inputs', and a summary indicating no fields. Do not fabricate fields where none exist.
+
+    11. **Strictly Adhere to the Schema:** Your final output MUST be a valid JSON object conforming exactly to the following Pydantic schema. Do not include any additional text, explanations, code, markdown, or characters outside this JSON object. The schema is:
+        - PageHolisticAnalysis:
+          - required_inputs: List[RequiredInput] (an array of objects; empty if no blanks)
+          - prefilled_inputs: List[PrefilledInput] (an array of objects; empty if no filled)
+          - summary: str (short summary)
+        - RequiredInput:
+          - input_type: str (one of the specified types)
+          - marker_text: str (exact text from document)
+          - description: str (brief explanation)
+        - PrefilledInput:
+          - input_type: str (one of the specified types)
+          - marker_text: str (exact text from document)
+          - value: str (extracted or descriptive value)
+        Ensure the JSON is properly formatted, with double quotes around keys and strings, and no trailing commas.
+
+    12. **IN CASE OF NO IDENTIFIED FILEDS OR BLANK DATA:** If you find no fields or inputs (blank or filled) on the page, return empty lists for both 'required_inputs' and 'prefilled_inputs', and a summary stating "No fields are present on this page; purely informational content." BUT THE SCHEMA MUST STILL BE FOLLOWED.
+    **Document Page Text to Analyze:**
+    ---
+    {page_text_content}
+    ---
+
+    **Image Analysis:** 
+    * Use the provided image to confirm the presence of blank fields, checkboxes, or other visual indicators of required inputs, and filled fields. Exclude filled fields (e.g., containing handwritten or printed text, signatures, or checked boxes) from requirements but include them in prefilled_inputs.
+    * THERE MIGHT BE ALREADY PROVIDED SIGNATURE, NAME, DATE, CHECK BOXES BY ONE PARTY. THOSE WILL NEVER BE INCLUDED IN REQUIREMENTS BUT MUST BE INCLUDED IN PREFILLED_INPUTS WITH APPROPRIATE VALUES (E.G., 'SIGNED' FOR SIGNATURES), AND NOTED IN THE SUMMARY. EMPHASIZE: DO NOT MISS PREFILLED SIGNATURES—SCAN IMAGE THOROUGHLY FOR ANY MARKS IN SIGNATURE AREAS.
+
+    **Final Reminder:** Output ONLY the JSON object. No introductions, conclusions, or extra content.
+    """
+    return prompt
+
+
+def get_multimodal_audit_prompt(
+    content_difference: str,
+    required_inputs_analysis: dict,
+    page_number: int
+) -> str:
+    """
+    Generates the master "4-Way" audit prompt for the VLLM.
+    """
+    
+    prompt = f"""
+    **Your Role:** You are a world-class Forensic Document Examiner with decades of experience in document authentication, fraud detection, and integrity verification. Your expertise encompasses analyzing digital and physical documents, including legal contracts, forms, applications, and official records, to identify discrepancies, fulfillments, and alterations. You approach each audit with meticulous attention to detail, cross-referencing multiple evidence sources to ensure impartial, accurate, and comprehensive findings. Your reports are used in high-stakes scenarios, so precision and professionalism are paramount.
+
+    **Context:** You are auditing a single page from a multi-page document that exists in two versions: the Non-Signed Version (NSV), which is the original blank template, and the Signed Version (SV), which is the user-filled and potentially signed copy. The audit focuses on verifying that all required inputs have been properly fulfilled and that no unauthorized changes have been made to the static content. You are currently auditing **Page Number {page_number}** (1-indexed) of the document.
+
+    **Evidence Package:** You will be provided with a multi-modal "evidence package" consisting of the following sources:
+    - **NSV Image:** (Visually inspect this via the provided image path) The original non-signed document page image, showing the template structure, labels, and blank fields.
+    - **SV Image:** (Visually inspect this via the provided image path) The filled/signed document page image, which may include user inputs like handwriting, checks, or stamps.
+    - **Content Difference JSON:** A precomputed JSON string detailing the structural differences between the transcribed NSV Content and SV Content using difflib. It is a list of changes, each with 'type' ('Addition', 'Deletion', 'Replace'/'Modification'), 'original_lines' (start, end, content from NSV), and 'new_lines' (start, end, content from SV). Use this to infer fulfillments and unauthorized changes. Raw NSV and SV Content are not provided directly; reconstruct necessary parts from the diffs and Initial Analysis.
+    Intelligently synthesize the sources: Use images for visual confirmation (e.g., handwriting presence, checks, or stamps), and the Content Difference JSON for textual changes (accounting for potential OCR errors or formatting variations in the underlying transcriptions). Perform deep cross-verification to resolve inconsistencies (e.g., if a diff suggests a change, confirm visually in Images if possible).
+
+    **Your Two-Part Mission:**
+
+    **Part 1: Audit Required Inputs**
+    - Review the `Initial Analysis` (from NSV), which lists all required inputs identified on this page, including their type, marker_text, and description.
+    - For each required input, examine the **Content Difference JSON** to find changes (e.g., 'Replace' or 'Addition') that correspond to the marker_text or description (search for the marker in 'original_lines.content' or 'new_lines.content').
+      - If a relevant change is found and it shows a blank/placeholder in original being replaced/added with a user-provided value in new, extract the exact value from 'new_lines.content' (parsing after the marker if needed), and validate it against the fulfillment criteria.
+      - If no relevant change is found, the field remains unchanged from NSV (blank), so set is_fulfilled=False.
+      - If a change is found but the new value is empty, invalid, or illegible, set is_fulfilled=False.
+    - Cross-reference with **SV Image** (primary for visual elements) and **NSV Image** to confirm.
+    - Fulfillment Criteria:
+      - 'signature': A change must indicate a signature (e.g., from '____' to a name or note), confirmed visibly in SV Image.
+      - 'date': New value must be a valid date (e.g., MM/DD/YYYY), extracted and confirmed in SV Image.
+      - 'full_name': New value must be a complete name.
+      - 'initials': New value must be initials.
+      - 'checkbox': Change must show a mark (e.g., from '□' to 'X' or '[X]'), confirmed in SV Image.
+      - 'address': New value must include complete address components.
+      - 'other': Evaluate based on context (e.g., phone number valid and complete).
+    - Important: If is_fulfilled=True for types like 'date', 'full_name', 'address', 'initials', or 'other', you MUST extract and include the exact value (quoted) in the audit_notes (e.g., 'Date "09/16/2024" extracted from diff...'). For 'signature' or 'checkbox', describe the presence. Do not hallucinate values—only report what is in the diff or images. If no value, set is_fulfilled=False and explain.
+    - Populate the `required_inputs` list with an entry for each, including `is_fulfilled` (bool) and `audit_notes` (detailed evidence-based explanation, referencing diff entries, line numbers, and image confirmations).
+
+    **Part 2: Audit for Unauthorized Content Changes**
+    - Review the Content Difference JSON, which already lists all textual differences between NSV and SV Content.
+    - For each diff entry, determine if it is an authorized filling of a required input: Check if it matches a marker_text or description from Initial Analysis (e.g., a 'Replace' near 'Date:' adding a date is authorized).
+    - **Ignore** diffs that are authorized input fillings or minor transcription artifacts (cross-check with Images if needed).
+    - **Report** only unauthorized discrepancies: additions, deletions, or modifications to static content that could alter meaning, confirmed across sources.
+    - Populate the `content_differences` list with details for unauthorized diffs (using nsv_text from original_lines.content, sv_text from new_lines.content, difference_type mapped from 'type' ('Addition'/'Deletion'/'Modification'), and description explaining why unauthorized).
+
+    **Determining Page Status:**
+    - 'Verified': All required inputs fulfilled AND no unauthorized content differences.
+    - 'Input Missing': One or more required inputs not fulfilled (regardless of differences).
+    - 'Content Mismatch': No missing inputs BUT unauthorized differences detected.
+    - 'Input Missing and Content Mismatch': Both issues present (use this for combined errors).
+
+    **Examples of Audit Findings:**
+    - Example 1 (Input Audit from Diff): Diff shows 'Replace' with original 'Signature: ____', new 'Signature: [scribble]'. Output: is_fulfilled=True, audit_notes='Signature indicated in diff new_lines " [scribble]", confirmed handwritten in SV Image.'.
+    - Example 2 (Input Audit No Change): No diff matching '□ Agree', assumes unchanged. Output: is_fulfilled=False, audit_notes='No change in Content Difference JSON for checkbox; remains unchecked per NSV, confirmed in SV Image.'.
+    - Example 3 (Unauthorized Diff): Diff 'Modification' on static text 'Fee: $100' to '$50', not matching any input. Output: ContentDifference with nsv_text='$100', sv_text='$50', difference_type='modification', description='Unauthorized alteration to fee amount, confirmed in SV Image.'.
+    - Example 4 (No Issues): All inputs have matching fulfilling diffs, no extra diffs. Status: 'Verified', empty content_differences.
+    - Example 5 (Artifact): Diff shows minor OCR diff like 'l00' vs '100', but Images match; ignore, no report.
+    - Example 6 (Date Fulfilled from Diff): Diff 'Replace' original 'Date: ____', new 'Date: 09/16/2024'. Output: is_fulfilled=True, audit_notes='Date "09/16/2024" extracted from diff new_lines, valid format, visible in SV Image.'.
+    - Example 7 (Date Not Fulfilled): No matching diff for 'Date:'. Output: is_fulfilled=False, audit_notes='No change in Content Difference JSON; field blank as in NSV.'.
+    - Example 8 (Anti-Pattern - **INCORRECT** vs **CORRECT** Audit of a Blank Field):
+      - **Scenario:** Diff shows 'Replace' original 'Prepared by: ____', new 'Prepared by: ' (empty).
+      - **INCORRECT LOGIC:** {{ "is_fulfilled": true, "audit_notes": "Field present in diff, but value empty." }} <- WRONG.
+      - **CORRECT LOGIC:** {{ "is_fulfilled": false, "audit_notes": "Diff shows no value added; remains blank in new_lines." }}
+    
+    **AUDITING GUIDELINES:**
+    - Maintain an objective, evidence-based approach: Rely strictly on the provided sources without assumptions or external knowledge.
+    - Cross-verify all findings: Use diff JSON with images to confirm each point, especially visuals.
+    - Provide clear, detailed audit_notes: Explain reasoning, cite specific diff entries (e.g., type, lines), and resolutions. 
+    - The Audit Notes must include values for fulfilled inputs where applicable, quoted exactly as found in diff. **YOU CAN ONLY CLAIM PRESENCE IF YOU CAN QUOTE THE VALUE FROM THE DIFF. IF A VALUE IS NOT PRESENT, DO NOT CLAIM IT. THIS MUST BE MAINTAINED. IF YOU DO NOT HAVE AN EXACT VALUE YOU WILL NOT CLAIM THAT ITS FILLED.**
+    - Ensure clarity and professionalism: Your report may be reviewed by legal or compliance teams, so clarity, accuracy, and formality are essential.
+    - Handle edge cases thoughtfully: Be vigilant for subtle diffs, partial fulfillments, or ambiguous changes, and document thoroughly.
+    - Adhere strictly to the output schema: Your final response must be a single, valid JSON object with no additional text or formatting.  
+    
+    **Chain of Thought Reasoning:**
+    Before generating the final JSON, engage in deep, step-by-step reasoning to ensure robustness and accuracy:
+    1. **Preparation:** Parse the Content Difference JSON into a list of changes. Review Initial Analysis for required inputs. Note potential transcription errors by prioritizing Image visuals.
+    2. **Part 1 Deep Audit:** For each required input in Initial Analysis:
+       - Search diff list for entries where marker_text appears in original_lines.content or new_lines.content.
+       - If found, extract value from new_lines.content (e.g., after ':'), check if non-empty and valid per criteria.
+       - Verify visually in SV Image/NSV Image.
+       - Resolve issues (e.g., if diff misses due to OCR, but Image shows, note and fulfill if Image confirms value).
+       - **Value Check & Fulfillment Decision:** Ask: **"Did I extract a non-empty, user-provided value from the diff?"**
+         - **If YES:** Set `is_fulfilled` to `true`. Quote value in `audit_notes`.
+         - **If NO:** Set `is_fulfilled` to `false`. Explain (e.g., 'No matching diff', 'Value empty in new_lines').
+       - Craft `audit_notes` citing diff details and images.
+    3. **Part 2 Deep Comparison:** 
+       - For each diff in JSON, check if it matches a required input (by marker/description overlap).
+       - If not matching any input, classify as unauthorized; map to difference_type ('addition' for Addition, etc.).
+       - Cross-check with Images: Discard if artifact (Images match despite diff).
+    4. **Status Evaluation:** Count fulfilled inputs and unauthorized diffs. Assign status, double-check.
+    5. **Robustness Check:** Re-scan diffs for missed matches, illegible visuals. Avoid hallucinations—stick to evidence.
+    Use this structured CoT to build a reliable audit, but do not include the reasoning in your output—only the JSON.
+
+    **--- THE GOLDEN RULE (MANDATORY FINAL CHECK) ---**
+    Before generating the JSON, you must perform one final review:
+    - **A field is ONLY `fulfilled` if it contains an actual user-provided value extracted from a diff.**
+    - The mere presence of a label in a diff with blank/empty is **NOT** fulfillment.
+    - If you set `is_fulfilled: true` for inputs like 'date', etc., you **MUST** have quoted the non-empty value in `audit_notes` from the diff.
+    - **If you cannot quote a value (no diff or empty), `is_fulfilled` MUST be `false`. No exceptions.**
+    A violation of this rule constitutes a complete failure of the audit.
+
+    **Final Output Instructions:**
+    - Your response MUST be a single, valid JSON object conforming to the schema below.
+    - Do not include any text, explanations, or markdown outside the JSON.
+    - Detailed Output Schema (PageAuditResult):
+        "page_number": int,  // The page number being audited (1-indexed). Echo {page_number}.
+        "page_status": str,  // One of: "Verified", "Input Missing", "Content Mismatch", "Input Missing and Content Mismatch".
+        "required_inputs": List[AuditedInput],  // List of audited required inputs.
+        "content_differences": List[AuditedContentDifference]  // List of detected unauthorized content changes; empty if none.
+      Where AuditedInput is:
+        "input_type": str,  // The type of input that was required (e.g., 'signature', 'date').
+        "marker_text": str,  // The text label identifying the input field (e.g., 'Signature:').
+        "description": str,  // Description of the input from the initial analysis.
+        "is_fulfilled": bool,  // True if the input was fulfilled, False if missing.
+        "audit_notes": str  // The AI's notes supporting its fulfillment decision, including quoted values where applicable.
+      Where AuditedContentDifference is:
+        "nsv_text": str,  // The original text snippet from the NSV (from original_lines.content).
+        "sv_text": str,  // The corresponding altered text snippet from the SV (from new_lines.content).
+        "difference_type": str,  // One of: 'addition', 'deletion', 'modification'.
+        "description": str  // A concise explanation of the unauthorized change.
+      
+    - Ensure JSON is properly formatted with double quotes, no trailing commas.
+
+    ---
+    **INITIAL ANALYSIS (from NSV):**
+    {json.dumps(required_inputs_analysis, indent=2)}
+    ---
+    **CONTENT DIFFERENCE JSON:**
+    {content_difference}
+
+    ---
+    **Final Reminder:** Output ONLY the JSON object. No additional content.
+    """
+    return prompt
+
+================================================================================
+--- File: ai/ocr/schemas.py ---
+================================================================================
+
+# document_ai_verification/ai/ocr/schemas.py
+
+from typing import List
+from pydantic import BaseModel, Field
+
+class OCRDetail(BaseModel):
+    """
+    Represents a single word or phrase detected by the OCR, including
+    its text, bounding polygon, and position.
+    """
+    poly: List[int] = Field(
+        ...,
+        description="A list of 8 integers for the four corner points [x1, y1, x2, y2, x3, y3, x4, y4] of the bounding polygon."
+    )
+    text: str = Field(
+        ...,
+        description="The transcribed text for that specific polygon."
+    )
+    line_num: int = Field(
+        ...,
+        description="The line number the text belongs to in the document."
+    )
+    word_num: int = Field(
+        ...,
+        description="The word number within that specific line."
+    )
+
+class OCRResponse(BaseModel):
+    """
+    Represents the full JSON response from the enOCR API.
+    """
+    status: str = Field(
+        ...,
+        description="The status of the OCR operation, e.g., 'success'."
+    )
+    plain_text: str = Field(
+        ...,
+        description="The full extracted text with newline characters preserving line breaks."
+    )
+    detailed_data: List[OCRDetail] = Field(
+        ...,
+        description="A list of objects, each containing detailed information about a transcribed word/phrase."
+    )
+
+================================================================================
+--- File: ai/ocr/client.py ---
+================================================================================
+
+# document_ai_verification/ai/ocr/client.py
+
+import logging
+from pathlib import Path
+import os
+
+import requests
+from pydantic import ValidationError
+from dotenv import load_dotenv
+
+from .schemas import OCRResponse
+
+# Set up a logger for this module. It will be configured in the main block for standalone testing.
+logger = logging.getLogger(__name__)
+
+class OcrAPIError(Exception):
+    """Custom exception for OCR API errors."""
+    pass
+
+def extract_text_from_image(
+    image_path: Path,
+    api_url: str
+) -> OCRResponse:
+    """
+    Calls the English OCR API to extract text from an image.
+
+    Args:
+        image_path (Path): The local path to the image file to process.
+        api_url (str): The full URL of the OCR endpoint.
+
+    Returns:
+        OCRResponse: A Pydantic object containing the parsed API response.
+
+    Raises:
+        OcrAPIError: If the API call fails, the response is invalid,
+                     or a non-200 status code is returned.
+    """
+    if not image_path.is_file():
+        msg = f"Image file not found at path: {image_path}"
+        logger.error(msg)
+        raise OcrAPIError(msg)
+
+    logger.info(f"Sending request to OCR API at {api_url} for image {image_path.name}")
+
+    try:
+        with open(image_path, "rb") as image_file:
+            # The 'files' dictionary specifies the form field name ('file') and the file object
+            files = {"file": (image_path.name, image_file, "image/png")}
+            
+            # Set a reasonable timeout as OCR can be a long-running task
+            response = requests.post(api_url, files=files, timeout=90)
+            
+            # Raise an HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
+            
+            response_json = response.json()
+            
+            # Validate and parse the response using the Pydantic model
+            return OCRResponse.model_validate(response_json)
+
+    except requests.exceptions.Timeout:
+        msg = f"OCR API request timed out after 90 seconds."
+        logger.error(msg)
+        raise OcrAPIError(msg)
+    except requests.exceptions.RequestException as e:
+        msg = f"Network error calling OCR API: {e}"
+        logger.error(msg)
+        raise OcrAPIError(msg) from e
+    except (ValidationError, KeyError, TypeError) as e:
+        msg = f"Failed to validate or parse OCR API response. Raw response might be: {response.text[:200]}... Error: {e}"
+        logger.error(msg)
+        raise OcrAPIError(msg) from e
+    except Exception as e:
+        msg = f"An unexpected error occurred in extract_text_from_image: {e}"
+        logger.error(msg)
+        raise OcrAPIError(msg) from e
+
+# ===================================================================
+# Standalone Test Block
+# ===================================================================
+if __name__ == "__main__":
+    # Configure basic logging to see output in the console
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # --- Step 1: Setup your environment ---
+    # Ensure you have a .env file in the project root with your OCR_URL
+    # Example .env content:
+    # OCR_URL="http://myapi.com/enocr"
+    
+    # We navigate up two directories to find the project root where .env is located
+    project_root = Path(__file__).resolve().parent.parent.parent
+    dotenv_path = project_root / ".env"
+    
+    if not dotenv_path.exists():
+        print(f"❌ Critical Error: .env file not found at {dotenv_path}")
+        print("Please create it with the necessary OCR_URL variable.")
+    else:
+        load_dotenv(dotenv_path=dotenv_path)
+        print(f"✅ Loaded environment variables from: {dotenv_path}")
+
+    # --- Step 2: Configure your test image ---
+    # Create a test image or update the path below to an existing image file.
+    # For this example, we'll look for 'sample_document.png' in the project root.
+    sample_image_path = project_root / "sample_document.png"
+
+    # --- Step 3: Run the test ---
+    ocr_api_url = os.getenv("OCR_URL")
+
+    if not ocr_api_url:
+        print("\n❌ Test Skipped: OCR_URL is not defined in your .env file.")
+    elif not sample_image_path.exists():
+        print(f"\n❌ Test Skipped: Sample image not found.")
+        print(f"Please place a test image named 'sample_document.png' in the project root: {project_root}")
+    else:
+        print("\n--- Running OCR Client Test ---")
+        print(f"API Endpoint: {ocr_api_url}")
+        print(f"Image Path:   {sample_image_path}")
+        
+        try:
+            # Call the main function to test the API
+            ocr_response = extract_text_from_image(
+                image_path=sample_image_path,
+                api_url=ocr_api_url
+            )
+            
+            print("\n✅ API Call Successful! Response format is valid.")
+            print("-" * 20)
+            print(f"Status: {ocr_response.status}")
+            print(f"Plain Text Preview: '{ocr_response.plain_text[:100].replace(chr(10), ' ')}...'")
+            print(f"Detailed Data Items Found: {len(ocr_response.detailed_data)}")
+            
+            # To see the full parsed structure, you can uncomment the next line:
+            # print("\nFull Parsed Response:")
+            # print(ocr_response.model_dump_json(indent=2))
+
+        except OcrAPIError as e:
+            print(f"\n❌ API Call Failed: {e}")
+
+================================================================================
+--- File: ai/ocr/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: api/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: api/main.py ---
+================================================================================
+
+# document_ai_verification/api/main.py
+
+import logging
+import json
+import shutil # Import shutil for the background task
+from pathlib import Path
+from typing import AsyncGenerator
+import asyncio
+
+# --- Import BackgroundTasks ---
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
+
+from ..core.verification_service import run_verification_workflow
+from ..core.exceptions import DocumentVerificationError, PageCountMismatchError
+from ..utils.config_loader import load_settings
+# --- Import the handler class itself ---
+from ..utils.file_utils import TemporaryFileHandler
+
+# --- Application Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Document AI Verification API",
+    description="An API to perform a detailed audit and verification of a signed document against its original version.",
+    version="2.4.0" # Version bump for background tasks
+)
+
+CONFIG = load_settings()['config']
+TEMP_DIR_BASE = Path(CONFIG['application']['temp_storage_path'])
+
+
+# --- Background Task Function for Cleanup ---
+async def cleanup_temp_dir(path: Path, delay_seconds: int):
+    """Waits for a specified time and then deletes the temporary directory."""
+    await asyncio.sleep(delay_seconds)
+    try:
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)
+            logger.info(f"Background task successfully cleaned up temporary directory: {path}")
+    except OSError as e:
+        logger.error(f"Background task failed to clean up temporary directory {path}: {e}")
+
+
+# --- API Endpoints ---
+# --- FIX: Full definition of the /health endpoint ---
+@app.get("/health", tags=["Health Check"], summary="Check if the API is running")
+async def read_root():
+    """Confirms that the API server is running."""
+    return {"status": "ok", "message": "Document AI Verification API is running."}
+
+
+# --- FIX: Full definition of the /temp endpoint ---
+@app.get("/temp/{request_id}/{file_path:path}", tags=["Utilities"])
+async def get_temp_file(request_id: str, file_path: str):
+    """
+    Serves a temporary file generated during the verification process.
+    Includes a security check to prevent accessing files outside the temp directory.
+    """
+    try:
+        base_path = TEMP_DIR_BASE.resolve()
+        full_path = (base_path / request_id / file_path).resolve()
+
+        if not str(full_path).startswith(str(base_path)):
+            logger.warning(f"Forbidden access attempt: {full_path}")
+            raise HTTPException(status_code=403, detail="Forbidden: Access denied.")
+
+        if not full_path.is_file():
+            logger.error(f"Temp file not found: {full_path}")
+            raise HTTPException(status_code=404, detail="File not found.")
+
+        return FileResponse(full_path)
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error serving temp file '{file_path}': {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+async def stream_formatter(generator: AsyncGenerator[dict, None]) -> AsyncGenerator[str, None]:
+    """
+    Takes an async generator that yields dictionaries and formats them
+    into Server-Sent Event (SSE) strings.
+    """
+    async for event_dict in generator:
+        json_data = json.dumps(event_dict)
+        yield f"data: {json_data}\n\n"
+
+
+@app.post("/verify/", tags=["Verification"])
+async def verify_documents_stream(
+    background_tasks: BackgroundTasks,
+    nsv_file: UploadFile = File(...),
+    sv_file: UploadFile = File(...)
+):
+    """
+    Processes documents, streams results, and schedules a background task for cleanup.
+    """
+    logger.info(f"Received stream verification request. NSV: '{nsv_file.filename}', SV: '{sv_file.filename}'")
+    
+    handler = TemporaryFileHandler(base_path=str(TEMP_DIR_BASE))
+    handler.setup()
+
+    try:
+        nsv_file_bytes = await nsv_file.read()
+        sv_file_bytes = await sv_file.read()
+        nsv_filename = nsv_file.filename
+        sv_filename = sv_file.filename
+    finally:
+        await nsv_file.close()
+        await sv_file.close()
+
+    cleanup_delay = CONFIG['application'].get('temp_storage_cleanup_delay_seconds', 600)
+    background_tasks.add_task(cleanup_temp_dir, handler.temp_dir, delay_seconds=cleanup_delay)
+
+    service_generator = run_verification_workflow(
+        handler=handler,
+        nsv_file_bytes=nsv_file_bytes,
+        nsv_filename=nsv_filename,
+        sv_file_bytes=sv_file_bytes,
+        sv_filename=sv_filename,
+    )
+    
+    return StreamingResponse(
+        stream_formatter(service_generator), 
+        media_type="text/event-stream"
+    )
+
+# --- Static Files Hosting ---
+frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="static")
+
+================================================================================
+--- File: core/verification_service.py ---
+================================================================================
+
+import asyncio
+import logging
+from pathlib import Path
+import json
+from typing import Dict, Any, List, Tuple, AsyncGenerator
+
+# --- Import your new image utils ---
+from ..utils.image_utils import analyze_page_meta_from_image, generate_difference_images
+from ..utils.text_utils import get_structured_diff_json
+import cv2
+
+# Import all other custom modules
+from ..utils.config_loader import load_settings
+from ..utils.file_utils import TemporaryFileHandler
+from ..ai.llm.client import LLMService
+from ..ai.llm.prompts import (
+    get_ns_document_analysis_prompt_holistic,
+    get_multimodal_audit_prompt
+)
+from ..ai.llm.schemas import (
+    PageHolisticAnalysis,
+    PageAuditResult
+)
+from ..ai.ocr.client import extract_text_from_image, OcrAPIError
+from .exceptions import PageCountMismatchError, ContentMismatchError, DocumentVerificationError
+from .schemas import VerificationReport
+
+
+# --- Setup ---
+logger = logging.getLogger(__name__)
+APP_SETTINGS = load_settings()
+SECRETS = APP_SETTINGS['secrets']
+CONFIG = APP_SETTINGS['config']
+LLM_CLIENT = LLMService(
+    api_key=SECRETS['llm_api_key'],
+    model=SECRETS['llm_model_name'],
+    base_url=SECRETS['llm_api_url'],
+    max_context_tokens=CONFIG['ai_services']['llm'].get('max_context_tokens', 64000)
+)
+
+def _save_debug_json(data: Any, filename: str, output_path: Path):
+    """Saves data to a JSON file, handling Pydantic models correctly."""
+    filepath = output_path / filename
+    try:
+        def json_converter(o):
+            if hasattr(o, 'model_dump'):
+                return o.model_dump()
+            return f"<<non-serializable: {type(o).__name__}>>"
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, default=json_converter)
+        logger.info(f"Saved debug data to: {filepath}")
+    except Exception as e:
+        logger.error(f"Could not save debug file {filepath}. Error: {e}")
+
+
+# --- MODIFIED: Function now accepts the handler and has no try/finally block ---
+async def run_verification_workflow(
+    handler: TemporaryFileHandler, # <-- Accepts the handler object
+    nsv_file_bytes: bytes, 
+    nsv_filename: str, 
+    sv_file_bytes: bytes, 
+    sv_filename: str
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Orchestrates the verification workflow using a pre-existing temp file handler.
+    Cleanup is managed by the calling API endpoint's background task.
+    """
+    try:
+        # The handler is already set up, so we can use it immediately.
+        yield {"type": "status_update", "message": f"Processing with Request ID: {handler.request_id}"}
+        await asyncio.sleep(0.01)
+        
+        debug_output_path = Path(handler.temp_dir) / "debug_outputs"
+        debug_output_path.mkdir(exist_ok=True)
+
+        yield {"type": "status_update", "message": f"Saving original document: {nsv_filename}"}
+        await asyncio.sleep(0.01)
+        nsv_path = handler.save_bytes_as_file(nsv_file_bytes, nsv_filename)
+
+        yield {"type": "status_update", "message": f"Saving signed document: {sv_filename}"}
+        await asyncio.sleep(0.01)
+        sv_path = handler.save_bytes_as_file(sv_file_bytes, sv_filename)
+
+        yield {"type": "status_update", "message": "Extracting pages from original document..."}
+        await asyncio.sleep(0.01)
+        nsv_page_bundles = handler.extract_content_per_page(nsv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
+
+        yield {"type": "status_update", "message": "Extracting pages from signed document..."}
+        await asyncio.sleep(0.01)
+        sv_page_bundles = handler.extract_content_per_page(sv_path, dpi=CONFIG['application']['pdf_to_image_dpi'])
+        
+        _save_debug_json(nsv_page_bundles, "step_1_nsv_page_bundles.json", debug_output_path)
+        _save_debug_json(sv_page_bundles, "step_1_sv_page_bundles.json", debug_output_path)
+
+        # MODIFIED: Instead of raising an error, yield a failure message and stop.
+        if len(nsv_page_bundles) != len(sv_page_bundles):
+            error_message = f"Page count mismatch: Original document has {len(nsv_page_bundles)} pages, while the signed document has {len(sv_page_bundles)} pages."
+            logger.error(error_message)
+            yield {
+                "type": "verification_failed",
+                "data": { "final_status": "Failure", "message": error_message }
+            }
+            return # Stop the generator
+
+        yield {"type": "status_update", "message": f"Found {len(nsv_page_bundles)} pages. Starting Stage 1: Requirement Analysis..."}
+        await asyncio.sleep(0.01)
+        
+        requirements_map: Dict[int, PageHolisticAnalysis] = {}
+        for page_bundle in nsv_page_bundles:
+            page_num = page_bundle['page_num']
+            page_img = page_bundle["image_path"]
+            
+            yield {"type": "status_update", "message": f"Analyzing requirements for Page {page_num}..."}
+            await asyncio.sleep(0.01)
+            try:
+                prompt = get_ns_document_analysis_prompt_holistic(page_bundle['markdown_text'])
+                page_req_result = LLM_CLIENT.invoke_vision_structured(prompt=prompt, image_path=page_img, response_model=PageHolisticAnalysis)
+                requirements_map[page_num] = page_req_result
+            except Exception as e:    
+                logger.error(f"Error analyzing page {page_num}: {e}", exc_info=True)
+                yield {"type": "error", "message": "Server Critical Error during requirement analysis. Please Try Again Later. (GPU Overload)"}
+                return # Stop the generator
+            
+            result_payload = page_req_result.model_dump()
+            result_payload['page_number'] = page_num
+            
+            yield { "type": "process_step_result", "data": { "stage_id": "requirement_analysis", "stage_title": "Stage 1: Requirement Analysis", "result": result_payload } }
+            await asyncio.sleep(0.01)
+        
+        _save_debug_json(requirements_map, "step_2_requirements_map.json", debug_output_path)
+        yield {"type": "status_update", "message": "Stage 1 analysis complete."}
+        await asyncio.sleep(0.01)
+
+        # --- Stage 2: Page-by-Page Content Verification ---
+        yield {"type": "status_update", "message": "Starting Stage 2: Content Verification..."}
+        await asyncio.sleep(0.01)
+
+        for page_num in range(1, len(nsv_page_bundles) + 1):
+            yield {"type": "status_update", "message": f"Verifying content for Page {page_num}..."}
+            await asyncio.sleep(0.01)
+            content_type=None
+
+            page_requirements = requirements_map.get(page_num)
+            nsv_bundle = nsv_page_bundles[page_num - 1]
+            sv_bundle = sv_page_bundles[page_num - 1]
+
+            nsv_image_path = nsv_bundle['image_path']
+            sv_image_path = sv_bundle['image_path']
+            sv_markdown = sv_bundle['markdown_text']
+            nsv_markdown = nsv_bundle['markdown_text']
+                
+            nsv_img = cv2.imread(str(nsv_image_path))
+            sv_img = cv2.imread(str(sv_image_path))
+
+            
+            result_payload = {
+                "page_number": page_num,
+                "content_match": None, # Will be set later
+                "summary": "",
+                "original_diff_url": None,
+                "signed_diff_url": None,
+            }
+                
+            if not sv_markdown or not sv_markdown.strip():
+                yield {"type": "status_update", "message": f"Signed page {page_num} is scanned. Using OCR..."}
+                await asyncio.sleep(0.01)
+                content_type="scanned"
+                try:
+                    # NOTE: This part is simplified for brevity as content is not used later
+                    sv_content=extract_text_from_image(sv_image_path, api_url=SECRETS['ocr_url'])
+                    nsv_content=extract_text_from_image(nsv_image_path, api_url=SECRETS['ocr_url'])
+                except OcrAPIError:
+                    logger.warning(f"OCR processing failed for page {page_num}. Content analysis may be limited.")
+                    yield {"type": "error", "message": f"AI model failed during audit of page {page_num}. Please try again. (GPU Overload)."}
+                    return
+            else:
+                content_type="Digital"
+                sv_content = sv_markdown
+                nsv_content = nsv_markdown
+
+            content_diff=get_structured_diff_json(nsv_content,sv_content)
+            _save_debug_json({"nsv_content": nsv_content, "sv_content": sv_content,"difference":content_diff}, f"step_3_audit_input_{page_num}.json", debug_output_path)
+
+            
+            # --- BRANCH 1: Page was supposed to be static (no required inputs) ---
+            if page_requirements and not page_requirements.required_inputs and content_type=="Digital":
+                analysis_result = analyze_page_meta_from_image(nsv_img, sv_img)
+                result_payload["content_match"] = analysis_result["content_match"]
+
+                if not analysis_result["content_match"]:
+                    # This is a critical failure: an unauthorized change
+                    result_payload["verification_status"] = "Discrepancy-Found"
+                    bboxes = analysis_result["difference_bboxes"]
+                    summary_message = f"Unauthorized visual change detected in {len(bboxes)} area(s) on a page that should be static."
+                    result_payload["summary"] = summary_message
+                    
+                    diff_output_dir = handler.temp_dir / f"page_{page_num:02d}_diffs"
+                    try:
+                        original_diff_path, signed_diff_path = generate_difference_images(
+                            original_img=nsv_img, signed_img=sv_img, bboxes=bboxes, output_dir=diff_output_dir
+                        )
+                        original_rel_path = original_diff_path.relative_to(handler.temp_dir)
+                        signed_rel_path = signed_diff_path.relative_to(handler.temp_dir)
+                        result_payload["original_diff_url"] = f"/temp/{handler.request_id}/{original_rel_path}"
+                        result_payload["signed_diff_url"] = f"/temp/{handler.request_id}/{signed_rel_path}"
+                    except Exception as e:
+                        logger.error(f"Failed to generate difference images for page {page_num}: {e}")
+                    
+                    # MODIFIED: Yield the page result, then yield the failure message and stop.
+                    yield {
+                        "type": "process_step_result",
+                        "data": {
+                            "stage_id": "content_verification",
+                            "stage_title": "Stage 2: Content Verification",
+                            "result": result_payload
+                        }
+                    }
+                    await asyncio.sleep(0.01)
+                    yield {
+                        "type": "verification_failed",
+                        "data": { "final_status": "Failure", "message": f"Verification failed: {summary_message}" }
+                    }
+                    return # Stop the generator
+
+                else:
+                    result_payload["verification_status"] = "Verified"
+                    result_payload["summary"] = "Verified. No visual differences were detected on this static page."
+
+            # --- BRANCH 2: Page was dynamic (expected to be changed) ---
+            else:
+                yield {"type": "status_update", "message": f"Starting multi-modal audit for Page {page_num}..."}
+                await asyncio.sleep(0.01)
+                
+                # Step 3.2: Construct the prompt
+                prompt = get_multimodal_audit_prompt(
+                    content_difference=content_diff,
+                    required_inputs_analysis=page_requirements.model_dump(),
+                    page_number=page_num
+                )
+
+                # Step 3.3: Call the VLLM for a structured audit
+                try:
+                    audit_result = LLM_CLIENT.invoke_image_compare_structured(
+                        prompt=prompt,
+                        image_path_1=nsv_image_path,
+                        image_path_2=sv_image_path,
+                        response_model=PageAuditResult
+                    )
+                    _save_debug_json(audit_result, f"step_3_audit_result_page_{page_num}.json", debug_output_path)
+
+                except Exception as e:
+                    logger.error(f"Critical error during multi-modal audit for page {page_num}: {e}", exc_info=True)
+                    yield {"type": "error", "message": f"AI model failed during audit of page {page_num}. Please try again. (GPU Overload)."}
+                    return
+
+                # Step 3.4: Yield the result and check for failure
+                yield {
+                    "type": "process_step_result",
+                    "data": {
+                        "stage_id": "multimodal_audit",
+                        "stage_title": "Stage 3: Multi-Modal Audit",
+                        "result": audit_result.model_dump()
+                    }
+                }
+                await asyncio.sleep(0.01)
+
+                if audit_result.page_status != "Verified":
+                    failure_message = f"Audit failed on page {page_num}. Status: '{audit_result.page_status}'"
+                    yield {"type": "verification_failed", "data": {"final_status": "Failure", "message": failure_message}}
+                    return
+                
+
+            # --- Yield the result for Stage 2 ---
+            yield {
+                "type": "process_step_result",
+                "data": {
+                    "stage_id": "content_verification",
+                    "stage_title": "Stage 2: Content Verification",
+                    "result": result_payload
+                }
+            }
+            await asyncio.sleep(0.01)
+        
+        yield { "type": "workflow_complete", "data": { "final_status": "Success", "message": "All planned stages have finished." } }
+        await asyncio.sleep(0.01)
+            
+    # MODIFIED: Removed handled exceptions from this block
+    except DocumentVerificationError as e:
+        logger.error(f"A known document processing error occurred: {e}")
+        yield {"type": "error", "message": str(e)}
+    except Exception as e:
+        logger.exception("An unexpected error occurred during the verification workflow.")
+        yield {"type": "error", "message": f"An unexpected server error occurred. Please check system logs."}
+
+================================================================================
+--- File: core/exceptions.py ---
+================================================================================
+
+# document_ai_verification/core/exceptions.py
+
+class DocumentVerificationError(Exception):
+    """
+    Base exception for all custom errors related to the verification process.
+    Catching this will catch any of our specific verification errors.
+    """
+    def __init__(self, message="An error occurred during document verification."):
+        self.message = message
+        super().__init__(self.message)
+
+class PageCountMismatchError(DocumentVerificationError):
+    """
+    Raised when the non-signed and signed documents have a different number of pages.
+    This is a critical, early-stage validation failure.
+    """
+    def __init__(self, message="Document page counts do not match."):
+        super().__init__(message)
+
+class ContentMismatchError(DocumentVerificationError):
+    """
+    Raised when the static, non-input content of a page appears to have been altered.
+    This could indicate tampering.
+    """
+    def __init__(self, message="Static content on a page does not match the original document."):
+        super().__init__(message)
+
+class VerificationFailureError(DocumentVerificationError):
+    """
+    Raised when a specific, required input (like a signature or date) is found
+    to be missing or unfulfilled on the signed document.
+    This is the most common expected failure.
+    """
+    def __init__(self, message="A required input was not fulfilled."):
+        super().__init__(message)
+
+================================================================================
+--- File: core/schemas.py ---
+================================================================================
+
+# document_ai_verification/core/schemas.py
+
+from typing import List, Literal
+from pydantic import BaseModel, Field
+
+# Import the definitive PageAuditResult model from the LLM schemas.
+# This avoids duplication and ensures consistency between the AI's output
+# and the final API report.
+from ..ai.llm.schemas import PageAuditResult
+
+# --- Top-Level API Report Schemas ---
+
+# Define the overall status type for the final report.
+OverallStatus = Literal["Success", "Failure"]
+
+class VerificationReport(BaseModel):
+    """
+    The top-level object representing the complete verification report.
+    This is the final JSON object that the API will return to the frontend.
+    """
+    overall_status: OverallStatus = Field(
+        ..., 
+        description="The final, overall status of the entire document verification."
+    )
+    nsv_filename: str = Field(
+        ..., 
+        description="The filename of the non-signed version."
+    )
+    sv_filename: str = Field(
+        ..., 
+        description="The filename of the signed version."
+    )
+    page_count: int = Field(
+        ..., 
+        description="The total number of pages in the document."
+    )
+    # The list of page results now directly uses the validated PageAuditResult schema.
+    page_results: List[PageAuditResult] = Field(
+        ..., 
+        description="A list containing the detailed audit results for each page."
+    )
+
+================================================================================
+--- File: core/__init__.py ---
+================================================================================
+
+
+
+================================================================================
+--- File: frontend/index.html ---
+================================================================================
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Verification Auditor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Document Verification Auditor</h1>
+            <p>Upload the original and signed documents to begin the verification process.</p>
+        </header>
+
+        <main>
+            <div class="upload-section">
+                <!-- Original (Non-Signed) PDF Input -->
+                <label for="nsv-file" class="file-upload-label">
+                    <span>Original (Non-Signed) PDF</span>
+                    <p class="file-name" id="nsv-file-name">Click or drop file here</p>
+                </label>
+                <input type="file" id="nsv-file" name="nsv_file" accept=".pdf" hidden>
+
+                <!-- Final Signed PDF Input -->
+                <label for="sv-file" class="file-upload-label">
+                    <span>Final Signed PDF</span>
+                    <p class="file-name" id="sv-file-name">Click or drop file here</p>
+                </label>
+                <input type="file" id="sv-file" name="sv_file" accept=".pdf" hidden>
+                <button id="verify-button" disabled>Verify Documents</button>
+            </div>
+
+            
+            <!-- NEW: Container for all dynamic output -->
+            <div id="output-container" class="hidden">
+                
+                <!-- Section for real-time status logs -->
+                <div id="log-section">
+                    <h3>Processing Log</h3>
+                    <pre id="log-stream"></pre>
+                </div>
+
+                <!-- Section for the final summary status -->
+                <div id="summary-section" class="hidden">
+                    <h3>Final Status</h3>
+                    <p id="final-status-message"></p>
+                </div>
+                
+                <!-- Container where stage results will be dynamically injected -->
+                <div id="reports-container">
+                    <!-- 
+                        JavaScript will create stage sections here. For example:
+                        <div id="results-container-requirement_analysis" class="stage-container">
+                            <h2>Stage 1: Requirement Analysis</h2>
+                            ...cards for each page will be added here...
+                        </div> 
+                    -->
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
+================================================================================
+--- File: frontend/script.js ---
+================================================================================
+
+// --- Global function to open the image difference viewer ---
+// This is placed outside the main event listener to be accessible from inline 'onclick' attributes.
+function showDifferenceViewer(originalUrl, signedUrl) {
+    const newWindow = window.open('', '_blank');
+    if (newWindow) {
+        newWindow.document.write(`
+            <html>
+                <head>
+                    <title>Document Difference Viewer</title>
+                    <style>
+                        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; background-color: #343a40; color: #f8f9fa; }
+                        h1 { text-align: center; padding: 15px; background-color: #212529; margin: 0;}
+                        .viewer-container { display: flex; justify-content: space-around; padding: 20px; gap: 20px; align-items: flex-start; }
+                        .image-wrapper { flex: 1; border: 1px solid #6c757d; box-shadow: 0 4px 12px rgba(0,0,0,0.2); background-color: #495057; }
+                        .image-wrapper h2 { text-align: center; background-color: #212529; margin: 0; padding: 12px; border-bottom: 1px solid #6c757d; font-size: 1.2rem; }
+                        .image-wrapper img { width: 100%; display: block; }
+                        .original h2 { color: #28a745; } /* Green */
+                        .signed h2 { color: #dc3545; } /* Red */
+                    </style>
+                </head>
+                <body>
+                    <h1>Visual Comparison</h1>
+                    <div class="viewer-container">
+                        <div class="image-wrapper original">
+                            <h2>Original (Changes in Green)</h2>
+                            <img src="${originalUrl}" alt="Original document page with differences highlighted in green">
+                        </div>
+                        <div class="image-wrapper signed">
+                            <h2>Signed (Changes in Red)</h2>
+                            <img src="${signedUrl}" alt="Signed document page with differences highlighted in red">
+                        </div>
+                    </div>
+                </body>
+            </html>
+        `);
+        newWindow.document.close();
+    } else {
+        alert("Please allow popups for this site to view the difference images.");
+    }
+}
+
+
+document.addEventListener('DOMContentLoaded', () => {
+    // --- Element References ---
+    const nsvFileInput = document.getElementById('nsv-file');
+    const svFileInput = document.getElementById('sv-file');
+    const nsvFileName = document.getElementById('nsv-file-name');
+    const svFileName = document.getElementById('sv-file-name');
+    const verifyButton = document.getElementById('verify-button');
+
+    // --- Output Area References ---
+    const outputContainer = document.getElementById('output-container');
+    const logSection = document.getElementById('log-section');
+    const logStream = document.getElementById('log-stream');
+    const reportsContainer = document.getElementById('reports-container');
+    const summarySection = document.getElementById('summary-section');
+    const finalStatusMessage = document.getElementById('final-status-message');
+
+    // --- File Input Handling ---
+    function checkFilesAndEnableButton() {
+        const nsvReady = nsvFileInput.files.length > 0;
+        const svReady = svFileInput.files.length > 0;
+        verifyButton.disabled = !(nsvReady && svReady);
+    }
+
+    nsvFileInput.addEventListener('change', () => {
+        if (nsvFileInput.files.length > 0) {
+            nsvFileName.textContent = nsvFileInput.files[0].name;
+            nsvFileName.classList.add('selected');
+        } else {
+            nsvFileName.textContent = 'Click or drop file here';
+            nsvFileName.classList.remove('selected');
+        }
+        checkFilesAndEnableButton();
+    });
+
+    svFileInput.addEventListener('change', () => {
+        if (svFileInput.files.length > 0) {
+            svFileName.textContent = svFileInput.files[0].name;
+            svFileName.classList.add('selected');
+        } else {
+            svFileName.textContent = 'Click or drop file here';
+            svFileName.classList.remove('selected');
+        }
+        checkFilesAndEnableButton();
+    });
+
+    // --- Main Verification Logic ---
+    verifyButton.addEventListener('click', async () => {
+        resetUI();
+
+        const formData = new FormData();
+        formData.append('nsv_file', nsvFileInput.files[0]);
+        formData.append('sv_file', svFileInput.files[0]);
+
+        try {
+            const response = await fetch('/verify/', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || `Server Error: ${response.status}`);
+            }
+            
+            await processStream(response);
+
+        } catch (error) {
+            handleEvent({ type: 'error', message: `Client-side error: ${error.message}` });
+        }
+    });
+
+    // --- UI Management Functions ---
+    function resetUI() {
+        verifyButton.disabled = true;
+        verifyButton.textContent = 'Processing...';
+        
+        outputContainer.classList.remove('hidden');
+        logStream.textContent = '';
+        reportsContainer.innerHTML = '';
+        summarySection.classList.add('hidden');
+        finalStatusMessage.textContent = '';
+    }
+
+    function addLogMessage(message, isError = false) {
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = document.createElement('div');
+        logEntry.textContent = `[${timestamp}] ${message}`;
+        if (isError) {
+            logEntry.classList.add('error');
+        }
+        logStream.appendChild(logEntry);
+        logStream.scrollTop = logStream.scrollHeight; // Auto-scroll
+    }
+
+    // --- Stream Processing ---
+    async function processStream(response) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+                 addLogMessage("Stream finished.");
+                 break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop(); // Keep the last, possibly incomplete, part
+
+            for (const part of parts) {
+                if (part.startsWith('data:')) {
+                    const jsonString = part.substring(5).trim();
+                    if (!jsonString) continue;
+
+                    try {
+                        const event = JSON.parse(jsonString);
+                        try {
+                           handleEvent(event);
+                        } catch (renderError) {
+                            console.error("Error rendering event data:", renderError);
+                            handleEvent({ type: 'error', message: `Failed to render UI for event: ${renderError.message}` });
+                        }
+                    } catch (parseError) {
+                        console.error('Failed to parse JSON from stream:', jsonString);
+                        handleEvent({ type: 'error', message: 'Received malformed data from server.' });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Event Handling ---
+    function handleEvent(event) {
+        switch (event.type) {
+            case 'status_update':
+                addLogMessage(event.message);
+                break;
+            case 'process_step_result':
+                renderProcessStep(event.data);
+                break;
+            case 'workflow_complete':
+                renderWorkflowComplete(event.data);
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verify Again';
+                break;
+            // --- NEW CASE ADDED HERE ---
+            case 'verification_failed':
+                addLogMessage(`Workflow failed: ${event.data.message}`, true);
+                renderWorkflowComplete(event.data); // Re-use the same UI logic for the final summary
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verification Failed. Retry?';
+                break;
+            case 'error':
+                addLogMessage(event.message, true);
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verification Failed. Retry?';
+                break;
+            default:
+                console.warn('Received unknown event type:', event.type);
+        }
+    }
+    
+// Replace the entire renderProcessStep function in frontend/script.js with this one.
+    function renderProcessStep(data) {
+    const { stage_id, stage_title, result } = data;
+    const containerId = `results-container-${stage_id}`;
+
+    // 1. Find or create the container for this stage
+    let stageContainer = document.getElementById(containerId);
+    if (!stageContainer) {
+        stageContainer = document.createElement('div');
+        stageContainer.id = containerId;
+        stageContainer.className = 'stage-container';
+        stageContainer.innerHTML = `<h2>${stage_title}</h2>`;
+        reportsContainer.appendChild(stageContainer);
+    }
+
+    // 2. Create the result card
+    const resultCard = document.createElement('div');
+    resultCard.className = 'result-card';
+    let cardContentHtml = '';
+
+    // 3. Use a switch to generate the correct HTML for each stage
+    switch (stage_id) {
+        case 'requirement_analysis':
+            const requiredInputsHtml = result.required_inputs.length > 0
+                ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
+                : '<li>None</li>';
+
+            const prefilledInputsHtml = result.prefilled_inputs.length > 0
+                ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
+                : '<li>None</li>';
+            
+            cardContentHtml = `
+                <div class="card-header"><h4>Page ${result.page_number}</h4></div>
+                <div class="card-content">
+                    <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
+                    <h5>Required Inputs</h5>
+                    <ul>${requiredInputsHtml}</ul>
+                    <h5>Prefilled Inputs</h5>
+                    <ul>${prefilledInputsHtml}</ul>
+                </div>
+            `;
+            break;
+
+        case 'content_verification':
+            const status = result.verification_status; // "Verified", "Discrepancy-Found", "Needs-Review"
+            const statusText = status.replace('-', ' '); // "Discrepancy Found"
+            const statusClass = `status-${status.toLowerCase()}`; // "status-verified", "status-discrepancy-found", etc.
+            let buttonHtml = '';
+
+            if (status === 'Discrepancy-Found' && result.original_diff_url && result.signed_diff_url) {
+                const originalUrl = result.original_diff_url.replace(/"/g, '&quot;');
+                const signedUrl = result.signed_diff_url.replace(/"/g, '&quot;');
+                buttonHtml = `<button class="mismatch-button" onclick='showDifferenceViewer("${originalUrl}", "${signedUrl}")'>Show Discrepancy</button>`;
+            }
+
+            cardContentHtml = `
+                <div class="card-header">
+                    <h4>Page ${result.page_number}</h4>
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                </div>
+                <div class="card-content">
+                    <p><strong>Analysis:</strong> ${result.summary}</p>
+                    ${buttonHtml}
+                </div>
+            `;
+            break;
+        
+        case 'multimodal_audit':
+            // Sanitize status for CSS class names (e.g., "Input Missing and Content Mismatch" -> "status-input-missing-&-content-mismatch")
+            const statusTextAudit = result.page_status.replace(/ and /g, ' & ').replace(/ /g, '-');
+            const statusClassAudit = `status-${statusTextAudit.toLowerCase()}`;
+
+            // --- Render Fulfilled vs. Missing Inputs ---
+            const inputsHtml = result.required_inputs.length > 0
+                ? result.required_inputs.map(item => `
+                    <li class="audit-item ${item.is_fulfilled ? 'fulfilled' : 'missing'}">
+                        <span class="status-icon">${item.is_fulfilled ? '✔' : '✖'}</span>
+                        <div class="audit-details">
+                            <strong>${item.input_type} (Marker: "${item.marker_text}")</strong>
+                            <p>${item.audit_notes}</p>
+                        </div>
+                    </li>
+                `).join('')
+                : '<li>No required inputs were identified for this page.</li>';
+
+            // --- Render Content Differences (if any) ---
+            const differencesHtml = result.content_differences.length > 0
+                ? `<h5>Unauthorized Content Changes</h5>
+                   <ul class="audit-list">
+                       ${result.content_differences.map(diff => `
+                           <li class="audit-item mismatch">
+                               <span class="status-icon">!</span>
+                               <div class="audit-details">
+                                   <strong>Change Detected:</strong>
+                                   <p><em>Original:</em> "${diff.nsv_text}"</p>
+                                   <p><em>Modified:</em> "${diff.sv_text}"</p>
+                                   <p><em>AI Description:</em> ${diff.description}</p>
+                               </div>
+                           </li>
+                       `).join('')}
+                   </ul>`
+                : '';
+
+            cardContentHtml = `
+                <div class="card-header">
+                    <h4>Page ${result.page_number}</h4>
+                    <span class="status-badge ${statusClassAudit}">${result.page_status}</span>
+                </div>
+                <div class="card-content">
+                    <h5>Input Fulfillment Audit</h5>
+                    <ul class="audit-list">${inputsHtml}</ul>
+                    ${differencesHtml}
+                </div>
+            `;
+            break;
+        
+        default:
+            cardContentHtml = `<div class="card-content"><p>Unknown result type for stage: ${stage_id}</p></div>`;
+    }
+
+    resultCard.innerHTML = cardContentHtml;
+    stageContainer.appendChild(resultCard);
+}
+    
+    function renderWorkflowComplete(data) {
+        summarySection.classList.remove('hidden');
+        finalStatusMessage.textContent = `${data.final_status}: ${data.message}`;
+        finalStatusMessage.className = data.final_status.toLowerCase(); // 'success' or 'failure'
+    }
+});
+
+================================================================================
+--- File: frontend/style.css ---
+================================================================================
+
+/* --- Root Variables and Body (no changes) --- */
+:root {
+    --primary-color: #007bff;
+    --secondary-color: #6c757d;
+    --success-color: #28a745;
+    --failure-color: #dc3545;
+    --warning-color: #ffc107;
+    --light-bg: #f8f9fa;
+    --dark-text: #343a40;
+    --border-color: #dee2e6;
+    --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+    font-family: var(--font-family);
+    background-color: var(--light-bg);
+    color: var(--dark-text);
+    margin: 0;
+    padding: 20px;
+}
+
+.container {
+    max-width: 900px;
+    margin: 40px auto;
+    padding: 20px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+/* --- Header and Upload Section (no changes) --- */
+header {
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+}
+
+header h1 {
+    margin: 0;
+    font-size: 2rem;
+}
+
+.upload-section {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.file-upload-label {
+    width: 100%;
+    max-width: 500px;
+    padding: 30px;
+    border: 2px dashed var(--border-color);
+    border-radius: 8px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.3s, background-color 0.3s;
+}
+
+.file-upload-label:hover {
+    border-color: var(--primary-color);
+    background-color: #f8faff;
+}
+
+.file-upload-label span {
+    font-weight: bold;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.file-upload-label .file-name {
+    font-size: 0.9rem;
+    color: var(--secondary-color);
+    margin: 0;
+}
+
+.file-upload-label .file-name.selected {
+    color: var(--primary-color);
+    font-weight: bold;
+}
+
+#verify-button {
+    padding: 12px 25px;
+    font-size: 1rem;
+    color: #fff;
+    background-color: var(--primary-color);
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+    width: 100%;
+    max-width: 520px;
+}
+
+#verify-button:disabled {
+    background-color: var(--secondary-color);
+    cursor: not-allowed;
+}
+
+#verify-button:hover:not(:disabled) {
+    background-color: #0056b3;
+}
+
+.hidden {
+    display: none;
+}
+
+/* --- NEW: Output Sections --- */
+#output-container {
+    margin-top: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+}
+
+/* --- NEW: Log Section Styling --- */
+#log-section {
+    width: 100%;
+}
+
+#log-section h3, #summary-section h3, .stage-container h2 {
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+    color: var(--dark-text);
+}
+
+#log-stream {
+    background-color: #212529; /* Dark background for logs */
+    color: #e9ecef;
+    padding: 15px;
+    border-radius: 5px;
+    font-family: monospace;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 250px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+}
+
+#log-stream .error {
+    color: var(--failure-color);
+    font-weight: bold;
+}
+
+/* --- NEW: Summary Section Styling --- */
+#summary-section {
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+#final-status-message.success {
+    color: var(--success-color);
+    font-weight: bold;
+}
+
+#final-status-message.failure {
+    color: var(--failure-color);
+    font-weight: bold;
+}
+
+/* --- NEW: Dynamic Report Styling --- */
+#reports-container {
+    display: flex;
+    flex-direction: column;
+    gap: 30px; /* Space between different stages */
+}
+
+.stage-container {
+    width: 100%;
+}
+
+.result-card {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 15px;
+    background-color: #fff;
+    overflow: hidden; /* Ensures border-radius is respected by children */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.result-card .card-header {
+    background-color: var(--light-bg);
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.result-card .card-header h4 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.result-card .card-content {
+    padding: 15px;
+    font-size: 0.95rem;
+    line-height: 1.6;
+}
+
+.result-card .card-content h5 {
+    margin-top: 15px;
+    margin-bottom: 5px;
+    font-size: 1rem;
+}
+
+.result-card .card-content ul {
+    list-style-type: none;
+    padding-left: 5px;
+    margin: 0;
+}
+
+.result-card .card-content ul li {
+    margin-bottom: 5px;
+}
+
+/* --- Additions for Stage 2 in style.css --- */
+
+/* Makes the card header a flex container to align title and badge */
+.result-card .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Styles for the status badges */
+.status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    color: #fff;
+    text-transform: uppercase;
+}
+
+.status-verified {
+    background-color: var(--success-color);
+}
+
+.status-discrepancy-found {
+    background-color: var(--failure-color);
+}
+
+.status-needs-review {
+    background-color: var(--warning-color);
+    color: var(--dark-text); /* Use dark text on yellow for readability */
+}
+
+/* Styles for the "Show Discrepancy" button */
+.mismatch-button {
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: bold;
+    margin-top: 10px;
+    transition: background-color 0.2s;
+}
+
+.mismatch-button:hover {
+    background-color: #0056b3;
+}
+/* Badge colors for new statuses */
+.status-verified { background-color: var(--success-color); }
+.status-input-missing { background-color: var(--failure-color); }
+.status-content-mismatch { background-color: var(--failure-color); }
+.status-input-missing-&-content-mismatch { background-color: var(--failure-color); }
+
+/* Styling for the audit list (inputs and differences) */
+.audit-list {
+    list-style-type: none;
+    padding-left: 0;
+    margin-top: 10px;
+}
+
+.audit-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px;
+    border-radius: 5px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.audit-item .status-icon {
+    font-size: 1.2rem;
+    font-weight: bold;
+    line-height: 1.5;
+}
+
+.audit-item .audit-details {
+    flex-grow: 1;
+}
+.audit-item .audit-details p {
+    margin: 4px 0 0 0;
+    font-size: 0.9rem;
+    color: #555;
+}
+.audit-item .audit-details strong {
+    font-size: 0.95rem;
+}
+
+
+/* Specific colors for item statuses */
+.audit-item.fulfilled {
+    background-color: #eaf6ec; /* Light green */
+    border-left: 4px solid var(--success-color);
+}
+.audit-item.fulfilled .status-icon {
+    color: var(--success-color);
+}
+
+.audit-item.missing {
+    background-color: #fbe9e9; /* Light red */
+    border-left: 4px solid var(--failure-color);
+}
+.audit-item.missing .status-icon {
+    color: var(--failure-color);
+}
+
+.audit-item.mismatch {
+    background-color: #fff8e1; /* Light yellow */
+    border-left: 4px solid var(--warning-color);
+}
+.audit-item.mismatch .status-icon {
+    color: var(--warning-color);
+}
+

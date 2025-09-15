@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIError, BadRequestError
 from typing import Generator, Any, Type, TypeVar, List
 from pydantic import BaseModel, Field
+import cv2
+import numpy as np
 
 def build_structured_prompt(prompt: str, response_model: Type[BaseModel]) -> str:
     """
@@ -49,25 +51,50 @@ class ContextLengthExceededError(Exception):
     """Custom exception for when a prompt exceeds the model's context window."""
     pass
 
-def encode_image_to_base64(image_path: Path) -> str:
-    """Reads an image file and returns its base64 encoded string."""
+def encode_image_to_base64(image_path: Path, max_height: int = None) -> str:
+    """
+    Reads an image file, resizes it if it exceeds max_height while maintaining aspect ratio,
+    and returns its base64 encoded string.
+    """
     try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
+        if not max_height:
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # Read image with OpenCV
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise ValueError(f"Could not read image from path: {image_path}")
+
+        (h, w) = img.shape[:2]
+        
+        # Resize if height exceeds the max_height
+        if h > max_height:
+            ratio = max_height / float(h)
+            new_width = int(w * ratio)
+            dim = (new_width, max_height)
+            img = cv2.resize(img, dim, interpolation=cv2.INTER_AREA)
+            logging.info(f"Resized image {image_path.name} from {w}x{h} to {new_width}x{max_height}")
+
+        # Encode the (potentially resized) image to PNG format in memory
+        _, buffer = cv2.imencode('.png', img)
+        return base64.b64encode(buffer).decode('utf-8')
+
     except Exception as e:
-        logging.error(f"Error encoding image {image_path}: {e}")
+        logging.error(f"Error encoding or resizing image {image_path}: {e}")
         raise
 
 class LLMService:
     """
     A synchronous client for OpenAI-compatible APIs using the 'openai' library.
     """
-    def __init__(self,api_key:str ,model: str, base_url: str, max_context_tokens: int):
+    def __init__(self,api_key:str ,model: str, base_url: str, max_context_tokens: int, max_img_height: int = None):
         self.model = model
         self.max_context_tokens = max_context_tokens
+        self.max_img_height = max_img_height
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         
-        print(f"✅ LLMService (Sync) initialized for model '{self.model}' with max_tokens={self.max_context_tokens}.")
+        print(f"✅ LLMService (Sync) initialized for model '{self.model}' with max_tokens={self.max_context_tokens} and max_img_height={self.max_img_height}.")
 
     def invoke(self, prompt: str, **kwargs: Any) -> str:
         messages = [{"role": "user", "content": prompt}]
@@ -138,7 +165,7 @@ class LLMService:
         Sends a text prompt and an image to the VLLM and parses a structured JSON response.
         """
         logging.info(f"Performing vision call for image: {image_path.name}")
-        base64_image = encode_image_to_base64(image_path)
+        base64_image = encode_image_to_base64(image_path, max_height=self.max_img_height)
         
         structured_prompt = build_structured_prompt(prompt, response_model)
         
@@ -190,9 +217,9 @@ class LLMService:
         """
         logging.info(f"Performing vision-based comparison for images: {image_path_1.name} and {image_path_2.name}")
         
-        # Encode both images to base64
-        base64_image_1 = encode_image_to_base64(image_path_1)
-        base64_image_2 = encode_image_to_base64(image_path_2)
+        # Encode both images to base64, applying resizing if necessary
+        base64_image_1 = encode_image_to_base64(image_path_1, max_height=self.max_img_height)
+        base64_image_2 = encode_image_to_base64(image_path_2, max_height=self.max_img_height)
         
         # Build the structured prompt
         structured_prompt = build_structured_prompt(prompt, response_model)
@@ -254,8 +281,6 @@ if __name__ == '__main__':
     api_key=os.getenv("LLM_API_KEY")
     llm_service = None
     if all([model, base_url]):
-        llm_service = LLMService(api_key,model, base_url, max_context_tokens=131072 )
+        llm_service = LLMService(api_key,model, base_url, max_context_tokens=131072, max_img_height=896 )
     else:
         print("\nWARNING: Small LLM environment variables not set. Skipping tests for small model.")
-
-    

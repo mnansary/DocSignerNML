@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Tuple, AsyncGenerator
 
 # --- Import your new image utils ---
 from ..utils.image_utils import analyze_page_meta_from_image, generate_difference_images
+from ..utils.text_utils import get_structured_diff_json
 import cv2
 
 # Import all other custom modules
@@ -18,7 +19,8 @@ from ..ai.llm.prompts import (
 )
 from ..ai.llm.schemas import (
     PageHolisticAnalysis,
-    PageAuditResult
+    PageAuditResult,
+    AuditedInput
 )
 from ..ai.ocr.client import extract_text_from_image, OcrAPIError
 from .exceptions import PageCountMismatchError, ContentMismatchError, DocumentVerificationError
@@ -34,7 +36,8 @@ LLM_CLIENT = LLMService(
     api_key=SECRETS['llm_api_key'],
     model=SECRETS['llm_model_name'],
     base_url=SECRETS['llm_api_url'],
-    max_context_tokens=CONFIG['ai_services']['llm'].get('max_context_tokens', 64000)
+    max_context_tokens=CONFIG['ai_services']['llm'].get('max_context_tokens', 64000),
+    max_img_height=CONFIG['ai_services']['llm'].get('max_img_height')
 )
 
 def _save_debug_json(data: Any, filename: str, output_path: Path):
@@ -150,6 +153,7 @@ async def run_verification_workflow(
                 
             nsv_img = cv2.imread(str(nsv_image_path))
             sv_img = cv2.imread(str(sv_image_path))
+
             
             result_payload = {
                 "page_number": page_num,
@@ -165,39 +169,33 @@ async def run_verification_workflow(
                 content_type="scanned"
                 try:
                     # NOTE: This part is simplified for brevity as content is not used later
-                    extract_text_from_image(sv_image_path, api_url=SECRETS['ocr_url'])
-                    extract_text_from_image(nsv_image_path, api_url=SECRETS['ocr_url'])
+                    sv_content=extract_text_from_image(sv_image_path, api_url=SECRETS['ocr_url'])
+                    nsv_content=extract_text_from_image(nsv_image_path, api_url=SECRETS['ocr_url'])
                 except OcrAPIError:
                     logger.warning(f"OCR processing failed for page {page_num}. Content analysis may be limited.")
+                    yield {"type": "error", "message": f"AI model failed during audit of page {page_num}. Please try again. (GPU Overload)."}
+                    return
             else:
                 content_type="Digital"
+                sv_content = sv_markdown
+                nsv_content = nsv_markdown
 
-            
-            # --- BRANCH 1: Page was supposed to be static (no required inputs) ---
-            if page_requirements and not page_requirements.required_inputs and content_type=="Digital":
-                analysis_result = analyze_page_meta_from_image(nsv_img, sv_img)
-                result_payload["content_match"] = analysis_result["content_match"]
+            content_diff=get_structured_diff_json(nsv_content,sv_content)
+            _save_debug_json({"nsv_content": nsv_content, "sv_content": sv_content,"difference":content_diff}, f"step_3_audit_input_{page_num}.json", debug_output_path)
 
-                if not analysis_result["content_match"]:
-                    # This is a critical failure: an unauthorized change
-                    result_payload["verification_status"] = "Discrepancy-Found"
-                    bboxes = analysis_result["difference_bboxes"]
-                    summary_message = f"Unauthorized visual change detected in {len(bboxes)} area(s) on a page that should be static."
-                    result_payload["summary"] = summary_message
+
+            # --- NEW: Short-circuit logic for when no textual differences are found ---
+            if not content_diff or content_diff == '[]':
+                yield {"type": "status_update", "message": f"No textual changes detected on Page {page_num}. Assessing based on requirements..."}
+                await asyncio.sleep(0.01)
+
+                # BRANCH 1: No changes AND no inputs were required. This page is verified.
+                if not page_requirements or not page_requirements.required_inputs:
+                    result_payload["content_match"] = True
+                    result_payload["verification_status"] = "Verified"
+                    result_payload["summary"] = "Verified. No textual changes were detected on this static page."
                     
-                    diff_output_dir = handler.temp_dir / f"page_{page_num:02d}_diffs"
-                    try:
-                        original_diff_path, signed_diff_path = generate_difference_images(
-                            original_img=nsv_img, signed_img=sv_img, bboxes=bboxes, output_dir=diff_output_dir
-                        )
-                        original_rel_path = original_diff_path.relative_to(handler.temp_dir)
-                        signed_rel_path = signed_diff_path.relative_to(handler.temp_dir)
-                        result_payload["original_diff_url"] = f"/temp/{handler.request_id}/{original_rel_path}"
-                        result_payload["signed_diff_url"] = f"/temp/{handler.request_id}/{signed_rel_path}"
-                    except Exception as e:
-                        logger.error(f"Failed to generate difference images for page {page_num}: {e}")
-                    
-                    # MODIFIED: Yield the page result, then yield the failure message and stop.
+                    # Yield the result for Stage 2 and continue
                     yield {
                         "type": "process_step_result",
                         "data": {
@@ -207,32 +205,118 @@ async def run_verification_workflow(
                         }
                     }
                     await asyncio.sleep(0.01)
-                    yield {
-                        "type": "verification_failed",
-                        "data": { "final_status": "Failure", "message": f"Verification failed: {summary_message}" }
-                    }
-                    return # Stop the generator
+                    continue # Success for this page, move to the next one.
 
+                # BRANCH 2: No changes BUT inputs WERE required. This is a definitive failure.
                 else:
-                    result_payload["verification_status"] = "Verified"
-                    result_payload["summary"] = "Verified. No visual differences were detected on this static page."
+                    failure_message = f"Audit failed on page {page_num}: Document is unchanged, but inputs were required."
+                    yield {"type": "status_update", "message": failure_message}
+                    await asyncio.sleep(0.01)
 
-            # --- BRANCH 2: Page was dynamic (expected to be changed) ---
+                    # Manually construct the audit result without calling the LLM
+                    unfulfilled_inputs = [
+                        AuditedInput(
+                            input_type=req.input_type,
+                            marker_text=req.marker_text,
+                            is_fulfilled=False,
+                            audit_notes="Verification failed. The document content is identical to the original, so this required input was not fulfilled."
+                        ) for req in page_requirements.required_inputs
+                    ]
+                    
+                    manual_audit_result = PageAuditResult(
+                        page_number=page_num,
+                        page_status="Input Missing",
+                        required_inputs=unfulfilled_inputs,
+                        content_differences=[]
+                    )
+
+                    # Yield the manually created audit result
+                    yield {
+                        "type": "process_step_result",
+                        "data": {
+                            "stage_id": "multimodal_audit",
+                            "stage_title": "Stage 3: Multi-Modal Audit",
+                            "result": manual_audit_result.model_dump()
+                        }
+                    }
+                    await asyncio.sleep(0.01)
+                    
+                    # Yield the final failure message and stop the entire workflow
+                    yield {"type": "verification_failed", "data": {"final_status": "Failure", "message": failure_message}}
+                    return
+
+
+            # --- EXISTING LOGIC (WRAPPED IN ELSE): Only run if there ARE content differences ---
             else:
-                result_payload["verification_status"] = "Needs-Review"
-                result_payload["content_match"] = False # Differences are expected
-                result_payload["summary"] = "Changes were expected on this page. A visual check for unauthorized changes was skipped. Manual review of signatures/inputs is recommended."
+                # BRANCH 1: Page was supposed to be static (no inputs), but changes were found.
+                if page_requirements and not page_requirements.required_inputs and content_type=="Digital":
+                    analysis_result = analyze_page_meta_from_image(nsv_img, sv_img)
+                    result_payload["content_match"] = analysis_result["content_match"]
 
-            # --- Yield the result for Stage 2 ---
-            yield {
-                "type": "process_step_result",
-                "data": {
-                    "stage_id": "content_verification",
-                    "stage_title": "Stage 2: Content Verification",
-                    "result": result_payload
-                }
-            }
-            await asyncio.sleep(0.01)
+                    if not analysis_result["content_match"]:
+                        result_payload["verification_status"] = "Discrepancy-Found"
+                        bboxes = analysis_result["difference_bboxes"]
+                        summary_message = f"Unauthorized visual change detected in {len(bboxes)} area(s) on a page that should be static."
+                        result_payload["summary"] = summary_message
+                        
+                        diff_output_dir = handler.temp_dir / f"page_{page_num:02d}_diffs"
+                        try:
+                            original_diff_path, signed_diff_path = generate_difference_images(
+                                original_img=nsv_img, signed_img=sv_img, bboxes=bboxes, output_dir=diff_output_dir
+                            )
+                            result_payload["original_diff_url"] = f"/temp/{handler.request_id}/{original_diff_path.relative_to(handler.temp_dir)}"
+                            result_payload["signed_diff_url"] = f"/temp/{handler.request_id}/{signed_diff_path.relative_to(handler.temp_dir)}"
+                        except Exception as e:
+                            logger.error(f"Failed to generate difference images for page {page_num}: {e}")
+                        
+                        yield { "type": "process_step_result", "data": { "stage_id": "content_verification", "stage_title": "Stage 2: Content Verification", "result": result_payload } }
+                        await asyncio.sleep(0.01)
+                        yield { "type": "verification_failed", "data": { "final_status": "Failure", "message": f"Verification failed: {summary_message}" } }
+                        return
+
+                    else:
+                        result_payload["verification_status"] = "Verified"
+                        result_payload["summary"] = "Verified. No visual differences were detected on this static page."
+
+                # BRANCH 2: Page was dynamic (inputs required), and changes were found. Audit them.
+                else:
+                    yield {"type": "status_update", "message": f"Starting multi-modal audit for Page {page_num}..."}
+                    await asyncio.sleep(0.01)
+                    
+                    prompt = get_multimodal_audit_prompt(
+                        content_difference=content_diff,
+                        required_inputs_analysis=page_requirements.model_dump(),
+                        page_number=page_num
+                    )
+
+                    try:
+                        audit_result = LLM_CLIENT.invoke_image_compare_structured(
+                            prompt=prompt,
+                            image_path_1=nsv_image_path,
+                            image_path_2=sv_image_path,
+                            response_model=PageAuditResult
+                        )
+                        _save_debug_json(audit_result, f"step_3_audit_result_page_{page_num}.json", debug_output_path)
+
+                    except Exception as e:
+                        logger.error(f"Critical error during multi-modal audit for page {page_num}: {e}", exc_info=True)
+                        yield {"type": "error", "message": f"AI model failed during audit of page {page_num}. Please try again. (GPU Overload)."}
+                        return
+
+                    yield {
+                        "type": "process_step_result",
+                        "data": {
+                            "stage_id": "multimodal_audit",
+                            "stage_title": "Stage 3: Multi-Modal Audit",
+                            "result": audit_result.model_dump()
+                        }
+                    }
+                    await asyncio.sleep(0.01)
+
+                    if audit_result.page_status != "Verified":
+                        failure_message = f"Audit failed on page {page_num}. Status: '{audit_result.page_status}'"
+                        yield {"type": "verification_failed", "data": {"final_status": "Failure", "message": failure_message}}
+                        return
         
         yield { "type": "workflow_complete", "data": { "final_status": "Success", "message": "All planned stages have finished." } }
         await asyncio.sleep(0.01)

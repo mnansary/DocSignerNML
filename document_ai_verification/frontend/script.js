@@ -205,80 +205,138 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // --- Dynamic HTML Rendering ---
-    function renderProcessStep(data) {
-        const { stage_id, stage_title, result } = data;
-        const containerId = `results-container-${stage_id}`;
+    // Replace the entire renderProcessStep function in frontend/script.js with this one.
+function renderProcessStep(data) {
+    const { stage_id, stage_title, result } = data;
+    const containerId = `results-container-${stage_id}`;
 
-        // 1. Find or create the container for this stage
-        let stageContainer = document.getElementById(containerId);
-        if (!stageContainer) {
-            stageContainer = document.createElement('div');
-            stageContainer.id = containerId;
-            stageContainer.className = 'stage-container';
-            stageContainer.innerHTML = `<h2>${stage_title}</h2>`;
-            reportsContainer.appendChild(stageContainer);
-        }
-
-        // 2. Create the result card
-        const resultCard = document.createElement('div');
-        resultCard.className = 'result-card';
-        let cardContentHtml = '';
-
-        // 3. Use a switch to generate the correct HTML for each stage
-        switch (stage_id) {
-            case 'requirement_analysis':
-                const requiredInputsHtml = result.required_inputs.length > 0
-                    ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
-                    : '<li>None</li>';
-
-                const prefilledInputsHtml = result.prefilled_inputs.length > 0
-                    ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
-                    : '<li>None</li>';
-                
-                cardContentHtml = `
-                    <div class="card-header"><h4>Page ${result.page_number}</h4></div>
-                    <div class="card-content">
-                        <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
-                        <h5>Required Inputs</h5>
-                        <ul>${requiredInputsHtml}</ul>
-                        <h5>Prefilled Inputs</h5>
-                        <ul>${prefilledInputsHtml}</ul>
-                    </div>
-                `;
-                break;
-
-            case 'content_verification':
-                const status = result.verification_status; // "Verified", "Discrepancy-Found", "Needs-Review"
-                const statusText = status.replace('-', ' '); // "Discrepancy Found"
-                const statusClass = `status-${status.toLowerCase()}`; // "status-verified", "status-discrepancy-found", etc.
-                let buttonHtml = '';
-
-                if (status === 'Discrepancy-Found' && result.original_diff_url && result.signed_diff_url) {
-                    const originalUrl = result.original_diff_url.replace(/"/g, '&quot;');
-                    const signedUrl = result.signed_diff_url.replace(/"/g, '&quot;');
-                    buttonHtml = `<button class="mismatch-button" onclick='showDifferenceViewer("${originalUrl}", "${signedUrl}")'>Show Discrepancy</button>`;
-                }
-
-                cardContentHtml = `
-                    <div class="card-header">
-                        <h4>Page ${result.page_number}</h4>
-                        <span class="status-badge ${statusClass}">${statusText}</span>
-                    </div>
-                    <div class="card-content">
-                        <p><strong>Analysis:</strong> ${result.summary}</p>
-                        ${buttonHtml}
-                    </div>
-                `;
-                break;
-            
-            default:
-                cardContentHtml = `<div class="card-content"><p>Unknown result type for stage: ${stage_id}</p></div>`;
-        }
-
-        resultCard.innerHTML = cardContentHtml;
-        stageContainer.appendChild(resultCard);
+    // 1. Find or create the container for this stage
+    let stageContainer = document.getElementById(containerId);
+    if (!stageContainer) {
+        stageContainer = document.createElement('div');
+        stageContainer.id = containerId;
+        stageContainer.className = 'stage-container';
+        stageContainer.innerHTML = `<h2>${stage_title}</h2>`;
+        reportsContainer.appendChild(stageContainer);
     }
+
+    // 2. Create the result card
+    const resultCard = document.createElement('div');
+    resultCard.className = 'result-card';
+    let cardContentHtml = '';
+
+    // 3. Use a switch to generate the correct HTML for each stage
+    switch (stage_id) {
+        case 'requirement_analysis':
+            const requiredInputsHtml = result.required_inputs.length > 0
+                ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
+                : '<li>None</li>';
+
+            const prefilledInputsHtml = result.prefilled_inputs.length > 0
+                ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
+                : '<li>None</li>';
+            
+            cardContentHtml = `
+                <div class="card-header"><h4>Page ${result.page_number}</h4></div>
+                <div class="card-content">
+                    <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
+                    <h5>Required Inputs</h5>
+                    <ul>${requiredInputsHtml}</ul>
+                    <h5>Prefilled Inputs</h5>
+                    <ul>${prefilledInputsHtml}</ul>
+                </div>
+            `;
+            break;
+
+        case 'content_verification':
+            // --- FIX STARTS HERE ---
+            // Gracefully handle cases where this step is skipped or status is not set
+            const status = result.verification_status;
+            if (!status) {
+                // If there's no status, it's likely a dynamic page that was handled
+                // by the multimodal_audit stage, so we don't need to render this card.
+                return; 
+            }
+            // --- FIX ENDS HERE ---
+
+            const statusText = status.replace('-', ' '); // "Discrepancy Found"
+            const statusClass = `status-${status.toLowerCase()}`; // "status-verified", "status-discrepancy-found", etc.
+            let buttonHtml = '';
+
+            if (status === 'Discrepancy-Found' && result.original_diff_url && result.signed_diff_url) {
+                const originalUrl = result.original_diff_url.replace(/"/g, '&quot;');
+                const signedUrl = result.signed_diff_url.replace(/"/g, '&quot;');
+                buttonHtml = `<button class="mismatch-button" onclick='showDifferenceViewer("${originalUrl}", "${signedUrl}")'>Show Discrepancy</button>`;
+            }
+
+            cardContentHtml = `
+                <div class="card-header">
+                    <h4>Page ${result.page_number}</h4>
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                </div>
+                <div class="card-content">
+                    <p><strong>Analysis:</strong> ${result.summary}</p>
+                    ${buttonHtml}
+                </div>
+            `;
+            break;
+        
+        case 'multimodal_audit':
+            // Sanitize status for CSS class names (e.g., "Input Missing and Content Mismatch" -> "status-input-missing-&-content-mismatch")
+            const statusTextAudit = result.page_status.replace(/ and /g, ' & ').replace(/ /g, '-');
+            const statusClassAudit = `status-${statusTextAudit.toLowerCase()}`;
+
+            // --- Render Fulfilled vs. Missing Inputs ---
+            const inputsHtml = result.required_inputs.length > 0
+                ? result.required_inputs.map(item => `
+                    <li class="audit-item ${item.is_fulfilled ? 'fulfilled' : 'missing'}">
+                        <span class="status-icon">${item.is_fulfilled ? '✔' : '✖'}</span>
+                        <div class="audit-details">
+                            <strong>${item.input_type} (Marker: "${item.marker_text}")</strong>
+                            <p>${item.audit_notes}</p>
+                        </div>
+                    </li>
+                `).join('')
+                : '<li>No required inputs were identified for this page.</li>';
+
+            // --- Render Content Differences (if any) ---
+            const differencesHtml = result.content_differences.length > 0
+                ? `<h5>Unauthorized Content Changes</h5>
+                   <ul class="audit-list">
+                       ${result.content_differences.map(diff => `
+                           <li class="audit-item mismatch">
+                               <span class="status-icon">!</span>
+                               <div class="audit-details">
+                                   <strong>Change Detected:</strong>
+                                   <p><em>Original:</em> "${diff.nsv_text}"</p>
+                                   <p><em>Modified:</em> "${diff.sv_text}"</p>
+                                   <p><em>AI Description:</em> ${diff.description}</p>
+                               </div>
+                           </li>
+                       `).join('')}
+                   </ul>`
+                : '';
+
+            cardContentHtml = `
+                <div class="card-header">
+                    <h4>Page ${result.page_number}</h4>
+                    <span class="status-badge ${statusClassAudit}">${result.page_status}</span>
+                </div>
+                <div class="card-content">
+                    <h5>Input Fulfillment Audit</h5>
+                    <ul class="audit-list">${inputsHtml}</ul>
+                    ${differencesHtml}
+                </div>
+            `;
+            break;
+        
+        default:
+            cardContentHtml = `<div class="card-content"><p>Unknown result type for stage: ${stage_id}</p></div>`;
+    }
+
+    resultCard.innerHTML = cardContentHtml;
+    stageContainer.appendChild(resultCard);
+}
     
     function renderWorkflowComplete(data) {
         summarySection.classList.remove('hidden');

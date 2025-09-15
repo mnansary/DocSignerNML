@@ -265,3 +265,69 @@ header h1 {
 .mismatch-button:hover {
     background-color: #0056b3;
 }
+/* Badge colors for new statuses */
+.status-verified { background-color: var(--success-color); }
+.status-input-missing { background-color: var(--failure-color); }
+.status-content-mismatch { background-color: var(--failure-color); }
+.status-input-missing-&-content-mismatch { background-color: var(--failure-color); }
+
+/* Styling for the audit list (inputs and differences) */
+.audit-list {
+    list-style-type: none;
+    padding-left: 0;
+    margin-top: 10px;
+}
+
+.audit-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px;
+    border-radius: 5px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.audit-item .status-icon {
+    font-size: 1.2rem;
+    font-weight: bold;
+    line-height: 1.5;
+}
+
+.audit-item .audit-details {
+    flex-grow: 1;
+}
+.audit-item .audit-details p {
+    margin: 4px 0 0 0;
+    font-size: 0.9rem;
+    color: #555;
+}
+.audit-item .audit-details strong {
+    font-size: 0.95rem;
+}
+
+
+/* Specific colors for item statuses */
+.audit-item.fulfilled {
+    background-color: #eaf6ec; /* Light green */
+    border-left: 4px solid var(--success-color);
+}
+.audit-item.fulfilled .status-icon {
+    color: var(--success-color);
+}
+
+.audit-item.missing {
+    background-color: #fbe9e9; /* Light red */
+    border-left: 4px solid var(--failure-color);
+}
+.audit-item.missing .status-icon {
+    color: var(--failure-color);
+}
+
+.audit-item.mismatch {
+    background-color: #fff8e1; /* Light yellow */
+    border-left: 4px solid var(--warning-color);
+}
+.audit-item.mismatch .status-icon {
+    color: var(--warning-color);
+}

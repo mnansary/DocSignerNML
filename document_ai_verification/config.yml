@@ -34,6 +34,10 @@ ai_services:
     # Set this to a reasonable value to prevent runaway generation and control costs/latency.
     max_new_tokens: 2048
 
+    # The maximum height for an image before it's resized to maintain aspect ratio.
+    # This helps control payload size for vision models.
+    max_img_height: 896
+
   
   # Parameters for the OCR service. This section is included for future-proofing
   # in case the OCR service adds configurable parameters later.
