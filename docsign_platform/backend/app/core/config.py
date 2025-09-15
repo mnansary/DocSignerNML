@@ -19,11 +19,6 @@ class Settings(BaseSettings):
     # Storage Path
     STORAGE_BASE_PATH: str = os.path.join(BASE_DIR, "backend/storage")
 
-    # External Microservice URLs
-    SIGNATURE_API_URL: str
-    OCR_API_URL: str
-    LLM_API_URL: str
-    
     # Celery Configuration
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"

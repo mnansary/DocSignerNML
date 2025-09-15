@@ -50,12 +50,7 @@ This document provides a complete guide to setting up and using the DocSign Plat
     BACKEND_CORS_ORIGINS=["*"]
 
     # Storage Path (relative to the 'backend' directory)
-    STORAGE_BASE_PATH="./backend/storage"
-
-    # External Microservice URLs (placeholders)
-    SIGNATURE_API_URL="http://myapi.com/signdet"
-    OCR_API_URL="http://myapi.com/enocr"
-    LLM_API_URL="http://myapi.com/gemma3"
+    STORAGE_BASE_PATH="./storage"
 
     # Celery Configuration (for Redis)
     CELERY_BROKER_URL="redis://hostname:6379/0"
