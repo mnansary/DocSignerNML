@@ -1,3 +1,45 @@
+// --- Global function to open the image difference viewer ---
+// This is placed outside the main event listener to be accessible from inline 'onclick' attributes.
+function showDifferenceViewer(originalUrl, signedUrl) {
+    const newWindow = window.open('', '_blank');
+    if (newWindow) {
+        newWindow.document.write(`
+            <html>
+                <head>
+                    <title>Document Difference Viewer</title>
+                    <style>
+                        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; background-color: #343a40; color: #f8f9fa; }
+                        h1 { text-align: center; padding: 15px; background-color: #212529; margin: 0;}
+                        .viewer-container { display: flex; justify-content: space-around; padding: 20px; gap: 20px; align-items: flex-start; }
+                        .image-wrapper { flex: 1; border: 1px solid #6c757d; box-shadow: 0 4px 12px rgba(0,0,0,0.2); background-color: #495057; }
+                        .image-wrapper h2 { text-align: center; background-color: #212529; margin: 0; padding: 12px; border-bottom: 1px solid #6c757d; font-size: 1.2rem; }
+                        .image-wrapper img { width: 100%; display: block; }
+                        .original h2 { color: #28a745; } /* Green */
+                        .signed h2 { color: #dc3545; } /* Red */
+                    </style>
+                </head>
+                <body>
+                    <h1>Visual Comparison</h1>
+                    <div class="viewer-container">
+                        <div class="image-wrapper original">
+                            <h2>Original (Changes in Green)</h2>
+                            <img src="${originalUrl}" alt="Original document page with differences highlighted in green">
+                        </div>
+                        <div class="image-wrapper signed">
+                            <h2>Signed (Changes in Red)</h2>
+                            <img src="${signedUrl}" alt="Signed document page with differences highlighted in red">
+                        </div>
+                    </div>
+                </body>
+            </html>
+        `);
+        newWindow.document.close();
+    } else {
+        alert("Please allow popups for this site to view the difference images.");
+    }
+}
+
+
 document.addEventListener('DOMContentLoaded', () => {
     // --- Element References ---
     const nsvFileInput = document.getElementById('nsv-file');
@@ -117,7 +159,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     try {
                         const event = JSON.parse(jsonString);
-                        // --- FIX: Move the try/catch to be more specific ---
                         try {
                            handleEvent(event);
                         } catch (renderError) {
@@ -147,6 +188,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 verifyButton.disabled = false;
                 verifyButton.textContent = 'Verify Again';
                 break;
+            // --- NEW CASE ADDED HERE ---
+            case 'verification_failed':
+                addLogMessage(`Workflow failed: ${event.data.message}`, true);
+                renderWorkflowComplete(event.data); // Re-use the same UI logic for the final summary
+                verifyButton.disabled = false;
+                verifyButton.textContent = 'Verification Failed. Retry?';
+                break;
             case 'error':
                 addLogMessage(event.message, true);
                 verifyButton.disabled = false;
@@ -162,6 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const { stage_id, stage_title, result } = data;
         const containerId = `results-container-${stage_id}`;
 
+        // 1. Find or create the container for this stage
         let stageContainer = document.getElementById(containerId);
         if (!stageContainer) {
             stageContainer = document.createElement('div');
@@ -171,30 +220,63 @@ document.addEventListener('DOMContentLoaded', () => {
             reportsContainer.appendChild(stageContainer);
         }
 
+        // 2. Create the result card
         const resultCard = document.createElement('div');
         resultCard.className = 'result-card';
-        
-        // --- FIX: Render the correct data structure from PageHolisticAnalysis ---
-        const requiredInputsHtml = result.required_inputs.length > 0
-            ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
-            : '<li>None</li>';
+        let cardContentHtml = '';
 
-        const prefilledInputsHtml = result.prefilled_inputs.length > 0
-            ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
-            : '<li>None</li>';
+        // 3. Use a switch to generate the correct HTML for each stage
+        switch (stage_id) {
+            case 'requirement_analysis':
+                const requiredInputsHtml = result.required_inputs.length > 0
+                    ? result.required_inputs.map(item => `<li><strong>${item.input_type}:</strong> ${item.description}</li>`).join('')
+                    : '<li>None</li>';
 
-        resultCard.innerHTML = `
-            <div class="card-header">
-                <h4>Page ${result.page_number}</h4>
-            </div>
-            <div class="card-content">
-                <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
-                <h5>Required Inputs</h5>
-                <ul>${requiredInputsHtml}</ul>
-                <h5>Prefilled Inputs</h5>
-                <ul>${prefilledInputsHtml}</ul>
-            </div>
-        `;
+                const prefilledInputsHtml = result.prefilled_inputs.length > 0
+                    ? result.prefilled_inputs.map(item => `<li><strong>${item.input_type} (${item.marker_text}):</strong> ${item.value}</li>`).join('')
+                    : '<li>None</li>';
+                
+                cardContentHtml = `
+                    <div class="card-header"><h4>Page ${result.page_number}</h4></div>
+                    <div class="card-content">
+                        <p><strong>Summary:</strong> ${result.summary || 'Not available.'}</p>
+                        <h5>Required Inputs</h5>
+                        <ul>${requiredInputsHtml}</ul>
+                        <h5>Prefilled Inputs</h5>
+                        <ul>${prefilledInputsHtml}</ul>
+                    </div>
+                `;
+                break;
+
+            case 'content_verification':
+                const status = result.verification_status; // "Verified", "Discrepancy-Found", "Needs-Review"
+                const statusText = status.replace('-', ' '); // "Discrepancy Found"
+                const statusClass = `status-${status.toLowerCase()}`; // "status-verified", "status-discrepancy-found", etc.
+                let buttonHtml = '';
+
+                if (status === 'Discrepancy-Found' && result.original_diff_url && result.signed_diff_url) {
+                    const originalUrl = result.original_diff_url.replace(/"/g, '&quot;');
+                    const signedUrl = result.signed_diff_url.replace(/"/g, '&quot;');
+                    buttonHtml = `<button class="mismatch-button" onclick='showDifferenceViewer("${originalUrl}", "${signedUrl}")'>Show Discrepancy</button>`;
+                }
+
+                cardContentHtml = `
+                    <div class="card-header">
+                        <h4>Page ${result.page_number}</h4>
+                        <span class="status-badge ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="card-content">
+                        <p><strong>Analysis:</strong> ${result.summary}</p>
+                        ${buttonHtml}
+                    </div>
+                `;
+                break;
+            
+            default:
+                cardContentHtml = `<div class="card-content"><p>Unknown result type for stage: ${stage_id}</p></div>`;
+        }
+
+        resultCard.innerHTML = cardContentHtml;
         stageContainer.appendChild(resultCard);
     }
     

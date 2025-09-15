@@ -16,7 +16,9 @@ application:
   # Higher values result in better quality images for OCR and sign detection,
   # but also lead to larger file sizes and longer processing times. 300 is a good balance.
   pdf_to_image_dpi: 300
-
+  # --- Schedule the cleanup task to run IN THE BACKGROUND ---
+  # This will delete the directory 10 minutes (600 seconds) after the stream is done.
+  temp_storage_cleanup_delay_seconds: 600  # Time in seconds to keep temp files before cleanup (default: 10 minutes)
 # -------------------------------------
 # AI Service Parameters
 # -------------------------------------

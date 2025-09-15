@@ -216,3 +216,52 @@ header h1 {
 .result-card .card-content ul li {
     margin-bottom: 5px;
 }
+
+/* --- Additions for Stage 2 in style.css --- */
+
+/* Makes the card header a flex container to align title and badge */
+.result-card .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Styles for the status badges */
+.status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    color: #fff;
+    text-transform: uppercase;
+}
+
+.status-verified {
+    background-color: var(--success-color);
+}
+
+.status-discrepancy-found {
+    background-color: var(--failure-color);
+}
+
+.status-needs-review {
+    background-color: var(--warning-color);
+    color: var(--dark-text); /* Use dark text on yellow for readability */
+}
+
+/* Styles for the "Show Discrepancy" button */
+.mismatch-button {
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: bold;
+    margin-top: 10px;
+    transition: background-color 0.2s;
+}
+
+.mismatch-button:hover {
+    background-color: #0056b3;
+}

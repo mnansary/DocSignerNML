@@ -34,19 +34,9 @@ class PageHolisticAnalysis(BaseModel):
     summary: str = Field(..., description="A short summary of the prefilled and required fields, e.g., 'No fields are filled' or 'One party filled name, date, and signature; other party fields are blank.'")
 
 
-# ===================================================================
-# SECTION 2: Schema for VLLM-based OCR
-# ===================================================================
-
-class VllmOcrResult(BaseModel):
-    """
-    Represents the structured Markdown content extracted from a scanned image.
-    This is the target schema for the 'get_vllm_ocr_prompt'.
-    """
-    markdown_content: str = Field(..., description="The full text content of the image, formatted as clean Markdown.")
 
 # ===================================================================
-# SECTION 3: Schemas for the Final Multi-Modal Audit
+# SECTION 2: Schemas for the Final Multi-Modal Audit
 # ===================================================================
 # These models define the structure for the most complex LLM call, the final page audit.
 

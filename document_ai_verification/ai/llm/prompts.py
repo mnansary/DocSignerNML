@@ -86,6 +86,7 @@ def get_ns_document_analysis_prompt_holistic(page_text_content: str) -> str:
           - value: str (extracted or descriptive value)
         Ensure the JSON is properly formatted, with double quotes around keys and strings, and no trailing commas.
 
+    12. **IN CASE OF NO IDENTIFIED FILEDS OR BLANK DATA:** If you find no fields or inputs (blank or filled) on the page, return empty lists for both 'required_inputs' and 'prefilled_inputs', and a summary stating "No fields are present on this page; purely informational content." BUT THE SCHEMA MUST STILL BE FOLLOWED.
     **Document Page Text to Analyze:**
     ---
     {page_text_content}
@@ -96,68 +97,6 @@ def get_ns_document_analysis_prompt_holistic(page_text_content: str) -> str:
     * THERE MIGHT BE ALREADY PROVIDED SIGNATURE, NAME, DATE, CHECK BOXES BY ONE PARTY. THOSE WILL NEVER BE INCLUDED IN REQUIREMENTS BUT MUST BE INCLUDED IN PREFILLED_INPUTS WITH APPROPRIATE VALUES (E.G., 'SIGNED' FOR SIGNATURES), AND NOTED IN THE SUMMARY. EMPHASIZE: DO NOT MISS PREFILLED SIGNATURES—SCAN IMAGE THOROUGHLY FOR ANY MARKS IN SIGNATURE AREAS.
 
     **Final Reminder:** Output ONLY the JSON object. No introductions, conclusions, or extra content.
-    """
-    return prompt
-
-def get_image_comparison_prompt() -> str:
-    
-
-    """
-    Generates a prompt to instruct a Vision-Language Large Model (VLLM) to function as a highly accurate, formatting-aware Optical Character Recognition (OCR) engine for document image processing.
-    """
-    prompt = """
-    **Your Role:** You are an advanced, state-of-the-art Vision-Language Large Model (VLLM) acting as a specialized Optical Character Recognition (OCR) engine. Your expertise lies in analyzing images of document pages, such as legal forms, contracts, reports, or administrative paperwork, and transcribing their textual content with exceptional precision. You are designed to recognize and preserve the structural and formatting elements of the document, ensuring the output is both accurate and usable for downstream processing.
-
-    **Your Task:** Analyze the provided image of a single document page and transcribe its entire textual content into well-structured Markdown. Your transcription must reflect the exact content and layout of the document as it appears in the image, capturing all text and formatting elements such as headings, lists, and tables. This task is critical for automating document digitization, so your output must be reliable, consistent, and strictly adherent to the provided guidelines.
-
-    **Critical Instructions:**
-
-    1. **Preserve Document Structure and Formatting:**
-       - **Headings:** Identify and format headings using appropriate Markdown syntax (e.g., `# Heading 1`, `## Heading 2`, etc.), based on font size, weight, or other visual cues indicating hierarchy.
-       - **Lists:** Recognize ordered (numbered) and unordered (bulleted) lists, formatting them correctly in Markdown (e.g., `1. Item` for numbered lists, `- Item` for bulleted lists). Ensure indentation and nesting are preserved.
-       - **Tables:** Detect tabular data and format it using Markdown table syntax (e.g., `| Column1 | Column2 |\n|---------|---------|\n| Data1   | Data2   |`). Align content accurately and include headers if present.
-       - **Other Elements:** Preserve line breaks, paragraphs, and spacing as they appear. For example, a blank line in the document should be a blank line in the Markdown output.
-
-    2. **Accuracy and Fidelity:**
-       - Transcribe all visible text exactly as it appears in the image, preserving original wording, spelling, punctuation, and capitalization. Do not correct errors, paraphrase, or infer text that is not explicitly visible.
-       - If text is partially legible or unclear (e.g., due to poor image quality), transcribe it to the best of your ability and do not insert placeholders or guesses unless explicitly instructed.
-       - Handle special characters (e.g., ©, %, &, or currency symbols) accurately, using their correct representations in Markdown.
-
-    3. **Clean and Focused Output:**
-       - Your output must contain only the transcribed content in Markdown format. Do not include any commentary, explanations, analysis, or text that is not directly visible in the image.
-       - Avoid adding metadata, assumptions, or interpretations about the document's purpose or context unless explicitly requested.
-       - Ensure the Markdown is clean, syntactically correct, and free of unnecessary whitespace or formatting errors.
-
-    4. **Handling Variations and Edge Cases:**
-       - **Handwritten Text:** If the image contains handwritten notes, transcribe them as accurately as possible, treating them as regular text unless they are clearly part of a form field (e.g., a signature or filled-in blank).
-       - **Form Fields:** For text near blanks, checkboxes, or lines (e.g., "Name: ____"), transcribe the label and represent the blank space with the exact characters used (e.g., underscores, or a blank space if none are present).
-       - **Complex Layouts:** For multi-column layouts or mixed content (e.g., text with embedded images or logos), focus on transcribing the text in a logical reading order, using Markdown to approximate the structure as closely as possible.
-       - **Examples of Expected Output:**
-         - For a heading like "Section 1: Introduction" in bold, output: `# Section 1: Introduction`.
-         - For a list like "• Item A\n• Item B", output: `- Item A\n- Item B`.
-         - For a table like:
-           ```
-           Name    | Age
-           --------|----
-           John    | 30
-           ```
-           Output: `| Name | Age |\n|------|-----|\n| John | 30  |`.
-
-    5. **Strict Schema Compliance:**
-       - Your response must be a single, valid JSON object conforming to the following schema:
-         - **VllmOcrResult**:
-           - **markdown_content**: str (the complete transcribed text in clean Markdown format, including all headings, lists, tables, and other elements as they appear in the image).
-       - Use double quotes for keys and string values, ensure proper JSON syntax, and avoid including any text, comments, or markdown outside the JSON object.
-       - Example output: `{"markdown_content": "# Title\n\nParagraph text\n- Item 1\n- Item 2\n\n| Col1 | Col2 |\n|------|------|\n| Data | Data |"}`
-
-    6. **Edge Case for Empty or Non-Text Images:**
-       - If the image contains no text (e.g., a blank page or purely graphical content), return a JSON object with an empty string for `markdown_content`: `{"markdown_content": ""}`.
-       - If the image is unreadable or corrupted, return an empty string for `markdown_content` and do not attempt to guess or fabricate content.
-
-    **Final Reminder:**
-    - Provide ONLY the JSON object containing the `markdown_content` field with the transcribed Markdown.
-    - Do not include any additional text, explanations, code, or markdown outside the JSON object.
-    - Ensure the output is precise, professional, and ready for automated processing.
     """
     return prompt
 

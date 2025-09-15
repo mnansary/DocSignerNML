@@ -164,7 +164,7 @@ class LLMService:
                 raise ValueError("The vision model returned an empty response.")
             return response_model.model_validate_json(json_response_str)
         except Exception as e:
-            logging.error(f"An error occurred during structured vision invoke: {e}", exc_info=True)
+            logging.error(f"An error occurred during structured vision invoke: {e}  value: {json_response_str}", exc_info=True)
             raise
     
     def invoke_image_compare_structured(
